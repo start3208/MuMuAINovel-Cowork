@@ -947,8 +947,12 @@ def write_workspace_meta(output_dir: Path, source_json: Path, data: dict[str, An
     )
 
 
-def export_json_to_workspace(input_json: Path, output_dir: Path, force: bool) -> Path:
-    data = json.loads(input_json.read_text(encoding="utf-8"))
+def write_workspace_from_data(
+    data: dict[str, Any],
+    output_dir: Path,
+    force: bool,
+    source_json: Path | None = None,
+) -> Path:
     validation = validate_export_dict(data)
     if not validation.valid:
         raise ValueError("input JSON is not a valid MuMuAINovel export")
@@ -959,7 +963,7 @@ def export_json_to_workspace(input_json: Path, output_dir: Path, force: bool) ->
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    write_workspace_meta(output_dir, input_json, data)
+    write_workspace_meta(output_dir, source_json or Path("<generated>"), data)
     write_workspace_readme(output_dir, data)
 
     for section in TOP_LEVEL_ORDER:
@@ -984,6 +988,11 @@ def export_json_to_workspace(input_json: Path, output_dir: Path, force: bool) ->
         write_section_index(section, target, section_value, file_names)
 
     return output_dir
+
+
+def export_json_to_workspace(input_json: Path, output_dir: Path, force: bool) -> Path:
+    data = json.loads(input_json.read_text(encoding="utf-8"))
+    return write_workspace_from_data(data, output_dir, force=force, source_json=input_json)
 
 
 def read_workspace_meta(workspace_dir: Path) -> dict[str, Any]:

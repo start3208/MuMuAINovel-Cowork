@@ -89,6 +89,12 @@ backend/storage/
 temp/
 tmp/
 workspace/
+workspace-studio/frontend/node_modules/
+workspace-studio/frontend-dist/
+workspace-studio/frontend/*.tsbuildinfo
+workspace-studio/frontend/*.js
+workspace-studio/frontend/*.d.ts
+workspace-studio/backend/__pycache__/
 
 # Coverage
 .coverage
