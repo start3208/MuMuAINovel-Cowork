@@ -14,6 +14,7 @@ from app.models.generation_history import GenerationHistory
 from app.models.career import Career, CharacterCareer
 from app.models.memory import StoryMemory, PlotAnalysis
 from app.models.analysis_task import AnalysisTask
+from app.models.foreshadow import Foreshadow
 from app.models.project_default_style import ProjectDefaultStyle
 from app.schemas.import_export import (
     ProjectExportData,
@@ -29,6 +30,7 @@ from app.schemas.import_export import (
     CharacterCareerExportData,
     StoryMemoryExportData,
     PlotAnalysisExportData,
+    ForeshadowExportData,
     ProjectDefaultStyleExportData,
     ImportValidationResult,
     ImportResult
@@ -41,8 +43,8 @@ logger = get_logger(__name__)
 class ImportExportService:
     """导入导出服务类"""
     
-    SUPPORTED_VERSIONS = ["1.0.0", "1.1.0"]  # 支持的版本列表
-    CURRENT_VERSION = "1.1.0"  # 当前导出版本
+    SUPPORTED_VERSIONS = ["1.0.0", "1.1.0", "1.2.0"]  # 支持的版本列表
+    CURRENT_VERSION = "1.2.0"  # 当前导出版本
     
     @staticmethod
     async def export_project(
@@ -52,7 +54,8 @@ class ImportExportService:
         include_writing_styles: bool = True,
         include_careers: bool = True,
         include_memories: bool = False,
-        include_plot_analysis: bool = False
+        include_plot_analysis: bool = False,
+        include_foreshadows: bool = True
     ) -> ProjectExportData:
         """
         导出项目完整数据
@@ -65,6 +68,7 @@ class ImportExportService:
             include_careers: 是否包含职业系统
             include_memories: 是否包含故事记忆
             include_plot_analysis: 是否包含剧情分析
+            include_foreshadows: 是否包含伏笔数据
             
         Returns:
             ProjectExportData: 导出的项目数据
@@ -154,6 +158,12 @@ class ImportExportService:
         if include_plot_analysis:
             plot_analysis = await ImportExportService._export_plot_analysis(project_id, db)
             logger.info(f"导出剧情分析数: {len(plot_analysis)}")
+
+        # 导出伏笔（可选）
+        foreshadows = []
+        if include_foreshadows:
+            foreshadows = await ImportExportService._export_foreshadows(project_id, db)
+            logger.info(f"导出伏笔数: {len(foreshadows)}")
         
         # 导出项目默认风格
         project_default_style = await ImportExportService._export_project_default_style(project_id, db)
@@ -176,6 +186,7 @@ class ImportExportService:
             character_careers=character_careers,
             story_memories=story_memories,
             plot_analysis=plot_analysis,
+            foreshadows=foreshadows,
             project_default_style=project_default_style
         )
         
@@ -603,6 +614,53 @@ class ImportExportService:
             ))
         
         return exported
+
+    @staticmethod
+    async def _export_foreshadows(project_id: str, db: AsyncSession) -> List[ForeshadowExportData]:
+        """导出伏笔"""
+        result = await db.execute(
+            select(Foreshadow)
+            .where(Foreshadow.project_id == project_id)
+            .order_by(Foreshadow.plant_chapter_number, Foreshadow.created_at)
+        )
+        foreshadows = result.scalars().all()
+
+        exported = []
+        for foreshadow in foreshadows:
+            exported.append(ForeshadowExportData(
+                id=foreshadow.id,
+                title=foreshadow.title,
+                content=foreshadow.content,
+                hint_text=foreshadow.hint_text,
+                resolution_text=foreshadow.resolution_text,
+                source_type=foreshadow.source_type or "manual",
+                source_memory_id=foreshadow.source_memory_id,
+                source_analysis_id=foreshadow.source_analysis_id,
+                plant_chapter_number=foreshadow.plant_chapter_number,
+                target_resolve_chapter_number=foreshadow.target_resolve_chapter_number,
+                actual_resolve_chapter_number=foreshadow.actual_resolve_chapter_number,
+                status=foreshadow.status or "pending",
+                is_long_term=bool(foreshadow.is_long_term),
+                importance=foreshadow.importance if foreshadow.importance is not None else 0.5,
+                strength=foreshadow.strength if foreshadow.strength is not None else 5,
+                subtlety=foreshadow.subtlety if foreshadow.subtlety is not None else 5,
+                urgency=foreshadow.urgency if foreshadow.urgency is not None else 0,
+                related_characters=foreshadow.related_characters,
+                related_foreshadow_ids=foreshadow.related_foreshadow_ids,
+                tags=foreshadow.tags,
+                category=foreshadow.category,
+                notes=foreshadow.notes,
+                resolution_notes=foreshadow.resolution_notes,
+                auto_remind=bool(foreshadow.auto_remind),
+                remind_before_chapters=foreshadow.remind_before_chapters if foreshadow.remind_before_chapters is not None else 5,
+                include_in_context=bool(foreshadow.include_in_context),
+                created_at=foreshadow.created_at.isoformat() if foreshadow.created_at else None,
+                updated_at=foreshadow.updated_at.isoformat() if foreshadow.updated_at else None,
+                planted_at=foreshadow.planted_at.isoformat() if foreshadow.planted_at else None,
+                resolved_at=foreshadow.resolved_at.isoformat() if foreshadow.resolved_at else None
+            ))
+
+        return exported
     
     @staticmethod
     async def _export_project_default_style(project_id: str, db: AsyncSession) -> Optional[ProjectDefaultStyleExportData]:
@@ -664,6 +722,7 @@ class ImportExportService:
             "character_careers": len(data.get("character_careers", [])),
             "story_memories": len(data.get("story_memories", [])),
             "plot_analysis": len(data.get("plot_analysis", [])),
+            "foreshadows": len(data.get("foreshadows", [])),
             "has_default_style": data.get("project_default_style") is not None
         }
         
@@ -821,16 +880,35 @@ class ImportExportService:
                 # 使用标题作为key，如果有重复标题则取第一个（已导入的顺序）
                 if ch.title and ch.title not in chapter_title_to_id:
                     chapter_title_to_id[ch.title] = ch.id
+            chapter_number_to_id = {}
+            for ch in imported_chapters:
+                if ch.chapter_number is not None and ch.chapter_number not in chapter_number_to_id:
+                    chapter_number_to_id[ch.chapter_number] = ch.id
             
             memories_count = await ImportExportService._import_story_memories(
                 new_project.id, data.get("story_memories", []), chapter_title_to_id, char_mapping, db
             )
             statistics["story_memories"] = memories_count
             logger.info(f"导入故事记忆数: {memories_count}")
+
+            # 导入伏笔
+            foreshadow_id_mapping, foreshadow_count = await ImportExportService._import_foreshadows(
+                new_project.id,
+                data.get("foreshadows", []),
+                chapter_number_to_id,
+                db
+            )
+            statistics["foreshadows"] = foreshadow_count
+            logger.info(f"导入伏笔数: {foreshadow_count}")
             
             # 导入剧情分析（传入user_id以便创建分析任务记录）
             plot_analysis_count = await ImportExportService._import_plot_analysis(
-                new_project.id, data.get("plot_analysis", []), chapter_title_to_id, db, user_id
+                new_project.id,
+                data.get("plot_analysis", []),
+                chapter_title_to_id,
+                db,
+                user_id,
+                foreshadow_id_mapping
             )
             statistics["plot_analysis"] = plot_analysis_count
             logger.info(f"导入剧情分析数: {plot_analysis_count}")
@@ -903,6 +981,88 @@ class ImportExportService:
             count += 1
         
         return count
+
+    @staticmethod
+    def _parse_optional_datetime(value: Optional[str]) -> Optional[datetime]:
+        """解析可选时间字符串"""
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+
+    @staticmethod
+    async def _import_foreshadows(
+        project_id: str,
+        foreshadows_data: List[Dict],
+        chapter_number_to_id: Dict[int, str],
+        db: AsyncSession
+    ) -> Tuple[Dict[str, str], int]:
+        """导入伏笔，返回导出ID到新ID的映射和导入数量"""
+        foreshadow_id_mapping: Dict[str, str] = {}
+        pending_related_updates: List[Tuple[Foreshadow, List[str]]] = []
+        count = 0
+
+        for fs_data in foreshadows_data:
+            plant_chapter_number = fs_data.get("plant_chapter_number")
+            target_resolve_chapter_number = fs_data.get("target_resolve_chapter_number")
+            actual_resolve_chapter_number = fs_data.get("actual_resolve_chapter_number")
+
+            foreshadow = Foreshadow(
+                project_id=project_id,
+                title=fs_data.get("title"),
+                content=fs_data.get("content"),
+                hint_text=fs_data.get("hint_text"),
+                resolution_text=fs_data.get("resolution_text"),
+                source_type=fs_data.get("source_type", "manual"),
+                source_memory_id=fs_data.get("source_memory_id"),
+                source_analysis_id=fs_data.get("source_analysis_id"),
+                plant_chapter_id=chapter_number_to_id.get(plant_chapter_number),
+                plant_chapter_number=plant_chapter_number,
+                target_resolve_chapter_id=chapter_number_to_id.get(target_resolve_chapter_number),
+                target_resolve_chapter_number=target_resolve_chapter_number,
+                actual_resolve_chapter_id=chapter_number_to_id.get(actual_resolve_chapter_number),
+                actual_resolve_chapter_number=actual_resolve_chapter_number,
+                status=fs_data.get("status", "pending"),
+                is_long_term=fs_data.get("is_long_term", False),
+                importance=fs_data.get("importance", 0.5),
+                strength=fs_data.get("strength", 5),
+                subtlety=fs_data.get("subtlety", 5),
+                urgency=fs_data.get("urgency", 0),
+                related_characters=fs_data.get("related_characters"),
+                tags=fs_data.get("tags"),
+                category=fs_data.get("category"),
+                notes=fs_data.get("notes"),
+                resolution_notes=fs_data.get("resolution_notes"),
+                auto_remind=fs_data.get("auto_remind", True),
+                remind_before_chapters=fs_data.get("remind_before_chapters", 5),
+                include_in_context=fs_data.get("include_in_context", True),
+                created_at=ImportExportService._parse_optional_datetime(fs_data.get("created_at")),
+                updated_at=ImportExportService._parse_optional_datetime(fs_data.get("updated_at")),
+                planted_at=ImportExportService._parse_optional_datetime(fs_data.get("planted_at")),
+                resolved_at=ImportExportService._parse_optional_datetime(fs_data.get("resolved_at")),
+            )
+            db.add(foreshadow)
+            await db.flush()
+
+            exported_id = fs_data.get("id")
+            if exported_id:
+                foreshadow_id_mapping[exported_id] = foreshadow.id
+
+            pending_related_updates.append((foreshadow, fs_data.get("related_foreshadow_ids") or []))
+            count += 1
+
+        for foreshadow, related_export_ids in pending_related_updates:
+            if not related_export_ids:
+                continue
+            foreshadow.related_foreshadow_ids = [
+                foreshadow_id_mapping[exported_id]
+                for exported_id in related_export_ids
+                if exported_id in foreshadow_id_mapping
+            ]
+
+        return foreshadow_id_mapping, count
     
     @staticmethod
     async def _import_characters(
@@ -1258,7 +1418,8 @@ class ImportExportService:
         plot_data: List[Dict],
         chapter_mapping: Dict[str, str],
         db: AsyncSession,
-        user_id: str = None
+        user_id: str = None,
+        foreshadow_id_mapping: Optional[Dict[str, str]] = None
     ) -> int:
         """导入剧情分析，同时创建已完成的分析任务记录"""
         from datetime import datetime
@@ -1277,6 +1438,20 @@ class ImportExportService:
             )
             if existing.first():
                 continue
+
+            foreshadows = analysis_data.get("foreshadows")
+            if foreshadows and foreshadow_id_mapping:
+                foreshadows = [
+                    {
+                        **item,
+                        "reference_foreshadow_id": foreshadow_id_mapping.get(
+                            item.get("reference_foreshadow_id"),
+                            item.get("reference_foreshadow_id")
+                        )
+                    }
+                    if isinstance(item, dict) else item
+                    for item in foreshadows
+                ]
             
             analysis = PlotAnalysis(
                 project_id=project_id,
@@ -1290,7 +1465,7 @@ class ImportExportService:
                 hooks=analysis_data.get("hooks"),
                 hooks_count=analysis_data.get("hooks_count", 0),
                 hooks_avg_strength=analysis_data.get("hooks_avg_strength"),
-                foreshadows=analysis_data.get("foreshadows"),
+                foreshadows=foreshadows,
                 foreshadows_planted=analysis_data.get("foreshadows_planted", 0),
                 foreshadows_resolved=analysis_data.get("foreshadows_resolved", 0),
                 plot_points=analysis_data.get("plot_points"),

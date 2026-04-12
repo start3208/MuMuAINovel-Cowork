@@ -607,6 +607,7 @@ async def export_project_data(
             - include_careers: 是否包含职业系统
             - include_memories: 是否包含故事记忆
             - include_plot_analysis: 是否包含剧情分析
+            - include_foreshadows: 是否包含伏笔数据
     
     Returns:
         JSON文件下载
@@ -641,7 +642,8 @@ async def export_project_data(
             include_writing_styles=options.include_writing_styles,
             include_careers=options.include_careers,
             include_memories=options.include_memories,
-            include_plot_analysis=options.include_plot_analysis
+            include_plot_analysis=options.include_plot_analysis,
+            include_foreshadows=options.include_foreshadows
         )
         
         # 转换为JSON

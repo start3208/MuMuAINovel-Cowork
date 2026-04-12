@@ -88,6 +88,7 @@ backend/storage/
 .temp/
 temp/
 tmp/
+workspace/
 
 # Coverage
 .coverage

@@ -11,6 +11,7 @@ class ExportOptions(BaseModel):
     include_careers: bool = Field(True, description="是否包含职业系统")
     include_memories: bool = Field(False, description="是否包含故事记忆（数据量可能较大）")
     include_plot_analysis: bool = Field(False, description="是否包含剧情分析")
+    include_foreshadows: bool = Field(True, description="是否包含伏笔数据")
 
 
 class ChapterExportData(BaseModel):
@@ -200,6 +201,40 @@ class PlotAnalysisExportData(BaseModel):
     created_at: Optional[str] = None
 
 
+class ForeshadowExportData(BaseModel):
+    """伏笔导出数据"""
+    id: Optional[str] = None
+    title: str
+    content: str
+    hint_text: Optional[str] = None
+    resolution_text: Optional[str] = None
+    source_type: str = "manual"
+    source_memory_id: Optional[str] = None
+    source_analysis_id: Optional[str] = None
+    plant_chapter_number: Optional[int] = None
+    target_resolve_chapter_number: Optional[int] = None
+    actual_resolve_chapter_number: Optional[int] = None
+    status: str = "pending"
+    is_long_term: bool = False
+    importance: float = 0.5
+    strength: int = 5
+    subtlety: int = 5
+    urgency: int = 0
+    related_characters: Optional[List[str]] = None
+    related_foreshadow_ids: Optional[List[str]] = None
+    tags: Optional[List[str]] = None
+    category: Optional[str] = None
+    notes: Optional[str] = None
+    resolution_notes: Optional[str] = None
+    auto_remind: bool = True
+    remind_before_chapters: int = 5
+    include_in_context: bool = True
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    planted_at: Optional[str] = None
+    resolved_at: Optional[str] = None
+
+
 class ProjectDefaultStyleExportData(BaseModel):
     """项目默认风格导出数据"""
     style_name: str  # 通过风格名称关联
@@ -207,7 +242,7 @@ class ProjectDefaultStyleExportData(BaseModel):
 
 class ProjectExportData(BaseModel):
     """项目完整导出数据"""
-    version: str = "1.1.0"  # 升级版本号
+    version: str = "1.2.0"  # 升级版本号
     export_time: str
     project: Dict[str, Any]
     chapters: List[ChapterExportData] = []
@@ -223,6 +258,7 @@ class ProjectExportData(BaseModel):
     character_careers: List[CharacterCareerExportData] = []
     story_memories: List[StoryMemoryExportData] = []
     plot_analysis: List[PlotAnalysisExportData] = []
+    foreshadows: List[ForeshadowExportData] = []
     project_default_style: Optional[ProjectDefaultStyleExportData] = None
 
 
