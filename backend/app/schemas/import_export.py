@@ -244,6 +244,7 @@ class ProjectExportData(BaseModel):
     """项目完整导出数据"""
     version: str = "1.2.0"  # 升级版本号
     export_time: str
+    source_project_id: Optional[str] = None
     project: Dict[str, Any]
     chapters: List[ChapterExportData] = []
     characters: List[CharacterExportData] = []

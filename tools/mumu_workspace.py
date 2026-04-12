@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import http.cookiejar
 import json
+import mimetypes
 import re
 import shutil
 import sys
 import textwrap
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -195,6 +201,234 @@ class ValidationSummary:
     statistics: dict[str, int]
     errors: list[str]
     warnings: list[str]
+
+
+def load_simple_env(env_path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not env_path.exists():
+        return values
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip().strip("'").strip('"')
+    return values
+
+
+def default_base_url() -> str:
+    env = load_simple_env(BACKEND_ROOT / ".env")
+    host = env.get("APP_HOST", "127.0.0.1")
+    if host in {"0.0.0.0", "::"}:
+        host = "127.0.0.1"
+    port = env.get("APP_PORT", "8000")
+    return f"http://{host}:{port}"
+
+
+def default_local_auth() -> tuple[str | None, str | None]:
+    env = load_simple_env(BACKEND_ROOT / ".env")
+    return env.get("LOCAL_AUTH_USERNAME"), env.get("LOCAL_AUTH_PASSWORD")
+
+
+def decode_http_error(exc: urllib.error.HTTPError) -> str:
+    try:
+        body = exc.read().decode("utf-8", errors="replace")
+    except Exception:
+        body = ""
+    if body:
+        try:
+            payload = json.loads(body)
+            if isinstance(payload, dict):
+                detail = payload.get("detail") or payload.get("message")
+                if detail:
+                    return f"HTTP {exc.code}: {detail}"
+        except json.JSONDecodeError:
+            pass
+        return f"HTTP {exc.code}: {body}"
+    return f"HTTP {exc.code}: {exc.reason}"
+
+
+class LocalAPIClient:
+    def __init__(self, base_url: str, username: str, password: str):
+        self.base_url = base_url.rstrip("/")
+        self.username = username
+        self.password = password
+        self.cookie_jar = http.cookiejar.CookieJar()
+        self.opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(self.cookie_jar)
+        )
+
+    def build_url(self, path: str) -> str:
+        if path.startswith("http://") or path.startswith("https://"):
+            return path
+        return f"{self.base_url}{path}"
+
+    def request_json(
+        self,
+        path: str,
+        method: str = "GET",
+        payload: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[Any, Any]:
+        request_headers = {"Accept": "application/json"}
+        if headers:
+            request_headers.update(headers)
+
+        data_bytes = None
+        if payload is not None:
+            data_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            request_headers.setdefault("Content-Type", "application/json; charset=utf-8")
+
+        request = urllib.request.Request(
+            self.build_url(path),
+            data=data_bytes,
+            headers=request_headers,
+            method=method,
+        )
+        try:
+            with self.opener.open(request) as response:
+                raw = response.read().decode("utf-8")
+                return json.loads(raw), response.headers
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(decode_http_error(exc)) from exc
+
+    def request_bytes(
+        self,
+        path: str,
+        method: str = "GET",
+        payload: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[bytes, Any]:
+        request_headers = {}
+        if headers:
+            request_headers.update(headers)
+
+        data_bytes = None
+        if payload is not None:
+            data_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            request_headers.setdefault("Content-Type", "application/json; charset=utf-8")
+
+        request = urllib.request.Request(
+            self.build_url(path),
+            data=data_bytes,
+            headers=request_headers,
+            method=method,
+        )
+        try:
+            with self.opener.open(request) as response:
+                return response.read(), response.headers
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(decode_http_error(exc)) from exc
+
+    def upload_file_json(
+        self,
+        path: str,
+        file_path: Path | str,
+        field_name: str = "file",
+    ) -> Any:
+        file_path = Path(file_path)
+        boundary = f"----MuMuBoundary{uuid.uuid4().hex}"
+        content_type = mimetypes.guess_type(file_path.name)[0] or "application/json"
+
+        body = bytearray()
+
+        def write_text(text: str) -> None:
+            body.extend(text.encode("utf-8"))
+
+        write_text(f"--{boundary}\r\n")
+        write_text(
+            f'Content-Disposition: form-data; name="{field_name}"; filename="{file_path.name}"\r\n'
+        )
+        write_text(f"Content-Type: {content_type}\r\n\r\n")
+        body.extend(file_path.read_bytes())
+        write_text("\r\n")
+        write_text(f"--{boundary}--\r\n")
+
+        request = urllib.request.Request(
+            self.build_url(path),
+            data=bytes(body),
+            headers={
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with self.opener.open(request) as response:
+                raw = response.read().decode("utf-8")
+                return json.loads(raw)
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(decode_http_error(exc)) from exc
+
+    def login(self) -> None:
+        self.request_json(
+            "/api/auth/local/login",
+            method="POST",
+            payload={"username": self.username, "password": self.password},
+        )
+
+
+def resolve_api_credentials(args: argparse.Namespace) -> tuple[str, str, str]:
+    env_username, env_password = default_local_auth()
+    base_url = args.base_url or default_base_url()
+    username = args.username or env_username
+    password = args.password or env_password
+    if not username or not password:
+        raise ValueError(
+            "缺少本地登录凭据。请通过 --username/--password 传入，或在 backend/.env 中设置 LOCAL_AUTH_USERNAME / LOCAL_AUTH_PASSWORD。"
+        )
+    return base_url, username, password
+
+
+def derive_export_filename(headers: Any, project_id: str) -> str:
+    content_disposition = headers.get("Content-Disposition", "")
+    match = re.search(r"filename\*=UTF-8''([^;]+)", content_disposition)
+    if match:
+        return urllib.parse.unquote(match.group(1))
+    fallback = f"project_{project_id}.json"
+    return fallback
+
+
+def print_projects_table(items: list[dict[str, Any]]) -> None:
+    if not items:
+        print("没有找到项目。")
+        return
+
+    rows = []
+    for item in items:
+        rows.append({
+            "id": item.get("id", ""),
+            "title": item.get("title", ""),
+            "status": item.get("status", ""),
+            "chapters": str(item.get("chapter_count") or 0),
+            "updated": str(item.get("updated_at") or ""),
+        })
+
+    widths = {
+        "id": max(len("项目ID"), *(len(row["id"]) for row in rows)),
+        "title": max(len("标题"), *(len(row["title"]) for row in rows)),
+        "status": max(len("状态"), *(len(row["status"]) for row in rows)),
+        "chapters": max(len("章节数"), *(len(row["chapters"]) for row in rows)),
+        "updated": max(len("更新时间"), *(len(row["updated"]) for row in rows)),
+    }
+
+    header = (
+        f"{'项目ID'.ljust(widths['id'])}  "
+        f"{'标题'.ljust(widths['title'])}  "
+        f"{'状态'.ljust(widths['status'])}  "
+        f"{'章节数'.ljust(widths['chapters'])}  "
+        f"{'更新时间'.ljust(widths['updated'])}"
+    )
+    print(header)
+    print("-" * len(header))
+    for row in rows:
+        print(
+            f"{row['id'].ljust(widths['id'])}  "
+            f"{row['title'].ljust(widths['title'])}  "
+            f"{row['status'].ljust(widths['status'])}  "
+            f"{row['chapters'].ljust(widths['chapters'])}  "
+            f"{row['updated'].ljust(widths['updated'])}"
+        )
 
 
 def sanitize_filename(value: str) -> str:
@@ -511,6 +745,29 @@ def build_generic_readme_text() -> str:
         6. 再运行 `md-to-json` 生成回转 JSON。
         7. 把新 JSON 导回 MuMuAINovel。
 
+        如果你不想打开前端页面，也可以直接用同一个脚本列项目、导出、导入。
+
+        ## 后端直连命令
+
+        ```powershell
+        python tools/mumu_workspace.py list-projects
+        python tools/mumu_workspace.py export-project <project_id> output.json
+        python tools/mumu_workspace.py import-project output.json
+        ```
+
+        默认会读取 `backend/.env` 中的：
+
+        - `LOCAL_AUTH_USERNAME`
+        - `LOCAL_AUTH_PASSWORD`
+        - `APP_HOST`
+        - `APP_PORT`
+
+        如果需要，也可以手动传入：
+
+        ```powershell
+        python tools/mumu_workspace.py list-projects --base-url http://127.0.0.1:8000 --username admin --password admin123
+        ```
+
         ## 常用命令
 
         ```powershell
@@ -518,6 +775,9 @@ def build_generic_readme_text() -> str:
         python tools/mumu_workspace.py validate workspace/<folder>
         python tools/mumu_workspace.py md-to-json workspace/<folder> output.json
         python tools/mumu_workspace.py validate output.json
+        python tools/mumu_workspace.py list-projects
+        python tools/mumu_workspace.py export-project <project_id> output.json
+        python tools/mumu_workspace.py import-project output.json
         ```
 
         ## 导航建议
@@ -553,6 +813,12 @@ def build_generic_readme_text() -> str:
         - Markdown 工作区目录
 
         在 `md-to-json` 之前先跑一次 `validate`，可以更早发现字段缺失、类型错误或结构损坏。
+
+        ## 书籍 ID 说明
+
+        - `list-projects` 会直接打印项目 ID，便于定位书籍。
+        - `export-project` 导出的 JSON 顶层会额外包含 `source_project_id`。
+        - 生成的工作区元数据 `.mumu-workspace.toml` 也会保留这个来源项目 ID。
         """
     )
 
@@ -568,6 +834,7 @@ def write_workspace_meta(output_dir: Path, source_json: Path, data: dict[str, An
         "source_json": str(source_json),
         "version": data.get("version", ""),
         "export_time": data.get("export_time", ""),
+        "source_project_id": data.get("source_project_id"),
         "sections": [section for section in TOP_LEVEL_ORDER if section in data],
     }
     (output_dir / ".mumu-workspace.toml").write_text(
@@ -647,6 +914,8 @@ def workspace_to_export_dict(workspace_dir: Path) -> dict[str, Any]:
         "version": meta.get("version", ""),
         "export_time": meta.get("export_time", ""),
     }
+    if meta.get("source_project_id"):
+        data["source_project_id"] = meta.get("source_project_id")
 
     for section in TOP_LEVEL_ORDER:
         path = workspace_dir / SECTION_PATHS[section]
@@ -777,6 +1046,31 @@ def build_parser() -> argparse.ArgumentParser:
     validate = subparsers.add_parser("validate", help="validate either export JSON or a Markdown workspace")
     validate.add_argument("path", type=Path)
 
+    list_projects = subparsers.add_parser("list-projects", help="list projects from the local MuMuAINovel backend")
+    list_projects.add_argument("--base-url", default=None, help="backend base URL, default reads backend/.env")
+    list_projects.add_argument("--username", default=None, help="local auth username, default reads backend/.env")
+    list_projects.add_argument("--password", default=None, help="local auth password, default reads backend/.env")
+
+    export_project = subparsers.add_parser("export-project", help="export a project directly from the local backend by project id")
+    export_project.add_argument("project_id", help="MuMuAINovel project id")
+    export_project.add_argument("output_json", type=Path, nargs="?", help="optional output path")
+    export_project.add_argument("--base-url", default=None, help="backend base URL, default reads backend/.env")
+    export_project.add_argument("--username", default=None, help="local auth username, default reads backend/.env")
+    export_project.add_argument("--password", default=None, help="local auth password, default reads backend/.env")
+    export_project.add_argument("--include-generation-history", action="store_true", help="include generation history")
+    export_project.add_argument("--include-memories", action="store_true", help="include story memories")
+    export_project.add_argument("--include-plot-analysis", action="store_true", help="include plot analysis")
+    export_project.add_argument("--no-writing-styles", action="store_true", help="exclude writing styles")
+    export_project.add_argument("--no-careers", action="store_true", help="exclude careers")
+    export_project.add_argument("--no-foreshadows", action="store_true", help="exclude foreshadows")
+
+    import_project = subparsers.add_parser("import-project", help="import a project JSON directly into the local backend")
+    import_project.add_argument("input_json", type=Path)
+    import_project.add_argument("--base-url", default=None, help="backend base URL, default reads backend/.env")
+    import_project.add_argument("--username", default=None, help="local auth username, default reads backend/.env")
+    import_project.add_argument("--password", default=None, help="local auth password, default reads backend/.env")
+    import_project.add_argument("--skip-validate", action="store_true", help="skip calling /validate-import before import")
+
     return parser
 
 
@@ -814,6 +1108,57 @@ def main() -> int:
             summary = validate_export_dict(json.loads(path.read_text(encoding="utf-8")))
         print_validation(summary, str(path))
         return 0 if summary.valid else 1
+
+    if args.command == "list-projects":
+        base_url, username, password = resolve_api_credentials(args)
+        client = LocalAPIClient(base_url, username, password)
+        client.login()
+        payload, _ = client.request_json("/api/projects", method="GET")
+        print_projects_table(payload.get("items", []))
+        return 0
+
+    if args.command == "export-project":
+        base_url, username, password = resolve_api_credentials(args)
+        client = LocalAPIClient(base_url, username, password)
+        client.login()
+        export_options = {
+            "include_generation_history": bool(args.include_generation_history),
+            "include_writing_styles": not bool(args.no_writing_styles),
+            "include_careers": not bool(args.no_careers),
+            "include_memories": bool(args.include_memories),
+            "include_plot_analysis": bool(args.include_plot_analysis),
+            "include_foreshadows": not bool(args.no_foreshadows),
+        }
+        content, headers = client.request_bytes(
+            f"/api/projects/{args.project_id}/export-data",
+            method="POST",
+            payload=export_options,
+        )
+        output_path = args.output_json.resolve() if args.output_json else (REPO_ROOT / derive_export_filename(headers, args.project_id))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(content)
+        data = json.loads(content.decode("utf-8"))
+        print(f"已导出到: {output_path}")
+        print(f"source_project_id: {data.get('source_project_id')}")
+        return 0
+
+    if args.command == "import-project":
+        input_json = args.input_json.resolve()
+        base_url, username, password = resolve_api_credentials(args)
+        client = LocalAPIClient(base_url, username, password)
+        client.login()
+
+        if not args.skip_validate:
+            validation = client.upload_file_json("/api/projects/validate-import", input_json)
+            print("导入前校验结果:")
+            print(json.dumps(validation, ensure_ascii=False, indent=2))
+            if not validation.get("valid"):
+                return 1
+
+        result = client.upload_file_json("/api/projects/import", input_json)
+        print("导入结果:")
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("success") else 1
 
     parser.error("unknown command")
     return 2

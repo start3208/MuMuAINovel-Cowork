@@ -2,6 +2,12 @@
 
 这套工作流用于把 MuMuAINovel 的项目导出 JSON 转成适合 Claude Code 编辑的 Markdown 工作区，再从 Markdown 回转成可重新导入的 JSON。
 
+它现在也支持直接调用本地 MuMuAINovel 后端完成：
+
+- 列出项目与书籍 ID
+- 按项目 ID 导出 JSON
+- 直接导入 JSON
+
 ## 适用场景
 
 - 在 Claude Code 中进行正文写作、世界观整理、角色维护、伏笔维护
@@ -55,6 +61,29 @@
 6. 再运行 `md-to-json` 生成回转 JSON。
 7. 把新 JSON 导回 MuMuAINovel。
 
+如果你不想打开前端页面，也可以直接用同一个脚本列项目、导出、导入。
+
+## 后端直连命令
+
+```powershell
+python tools/mumu_workspace.py list-projects
+python tools/mumu_workspace.py export-project <project_id> output.json
+python tools/mumu_workspace.py import-project output.json
+```
+
+默认会读取 `backend/.env` 中的：
+
+- `LOCAL_AUTH_USERNAME`
+- `LOCAL_AUTH_PASSWORD`
+- `APP_HOST`
+- `APP_PORT`
+
+如果需要，也可以手动传入：
+
+```powershell
+python tools/mumu_workspace.py list-projects --base-url http://127.0.0.1:8000 --username admin --password admin123
+```
+
 ## 常用命令
 
 ```powershell
@@ -62,6 +91,9 @@ python tools/mumu_workspace.py json-to-md <export.json> workspace/<folder>
 python tools/mumu_workspace.py validate workspace/<folder>
 python tools/mumu_workspace.py md-to-json workspace/<folder> output.json
 python tools/mumu_workspace.py validate output.json
+python tools/mumu_workspace.py list-projects
+python tools/mumu_workspace.py export-project <project_id> output.json
+python tools/mumu_workspace.py import-project output.json
 ```
 
 ## 导航建议
@@ -97,3 +129,9 @@ Get-Content workspace/<folder>/chapters/ch-001-*.md
 - Markdown 工作区目录
 
 在 `md-to-json` 之前先跑一次 `validate`，可以更早发现字段缺失、类型错误或结构损坏。
+
+## 书籍 ID 说明
+
+- `list-projects` 会直接打印项目 ID，便于定位书籍。
+- `export-project` 导出的 JSON 顶层会额外包含 `source_project_id`。
+- 生成的工作区元数据 `.mumu-workspace.toml` 也会保留这个来源项目 ID。

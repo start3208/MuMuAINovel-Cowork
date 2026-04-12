@@ -173,6 +173,7 @@ class ImportExportService:
         export_data = ProjectExportData(
             version=ImportExportService.CURRENT_VERSION,
             export_time=datetime.utcnow().isoformat(),
+            source_project_id=project.id,
             project=project_data,
             chapters=chapters,
             characters=characters,
