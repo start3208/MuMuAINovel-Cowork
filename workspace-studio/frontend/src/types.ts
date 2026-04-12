@@ -69,3 +69,29 @@ export interface ProjectExportData {
   foreshadows: Array<Record<string, any>>;
   project_default_style?: Record<string, any> | null;
 }
+
+export interface WorkspaceCharacter {
+  id?: string;
+  name: string;
+  age?: string;
+  gender?: string;
+  is_organization?: boolean;
+  role_type?: string;
+  personality?: string;
+  background?: string;
+  appearance?: string;
+  relationships?: string;
+  traits?: string[] | string;
+  organization_type?: string;
+  organization_purpose?: string;
+  organization_members?: string;
+  avatar_url?: string;
+  main_career_id?: string;
+  main_career_stage?: number;
+  sub_careers?: string;
+  power_level?: number;
+  location?: string;
+  motto?: string;
+  color?: string;
+  created_at?: string;
+}
