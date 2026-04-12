@@ -63,6 +63,7 @@
 7. 把新 JSON 导回 MuMuAINovel。
 
 如果你不想打开前端页面，也可以直接用同一个脚本列项目、导出、导入、严格同步。
+`Workspace Studio` 也是直接复用这套核心读写与校验逻辑，不是另走一套独立格式。
 
 ## 后端直连命令
 
@@ -138,12 +139,74 @@ Get-Content workspace/<folder>/chapters/ch-001-*.md
 - 代码块里的 JSON 结构也可以直接改。
 - 文件名本身不是导入依据，导入依据是文件内容；所以一般不需要手动改文件名。
 
+## 保留与忽略规则
+
+保存工作区时，脚本和 `Workspace Studio` 只会重写“标准受管路径”，不会整目录清空。
+
+会被脚本重写的标准路径包括：
+
+- `README.md`
+- `.mumu-workspace.toml`
+- `project.md`
+- `project-default-style.md`
+- `chapters/`
+- `characters/`
+- `outlines/`
+- `relationships/`
+- `organizations/`
+- `organization-members/`
+- `careers/`
+- `character-careers/`
+- `foreshadows/`
+- `generation-history/`
+- `story-memories/`
+- `plot-analysis/`
+- `writing-styles/`
+
+下列内容默认会被保留，不会因为保存工作区而被删除：
+
+- 工作区根目录下自定义的 `_notes/`、`_drafts/`、`.cache/` 这类以下划线或点开头的目录
+- 工作区根目录下不属于标准受管路径的自定义文件
+- `CLAUDE.md`、`AGENTS.md`、`GEMINI.md` 这类 AI 协作说明文件
+
+同时，工作目录下以下划线或点开头的目录不会被识别为一本书或一个工作区。
+建议把草稿、说明、缓存都放进这些目录里。
+
+## 给 AI / Claude Code 的建议
+
+- 优先只修改已有文件，不要随意新增 Markdown 文件。
+- 如果必须新增内容，优先放进现有记录文件中，而不是新建“临时说明.md”之类的文件。
+- 不要在这些已知目录里随意新增额外 `.md` 文件：
+  - `chapters/`
+  - `characters/`
+  - `outlines/`
+  - `relationships/`
+  - `organizations/`
+  - `organization-members/`
+  - `careers/`
+  - `character-careers/`
+  - `foreshadows/`
+  - `generation-history/`
+  - `story-memories/`
+  - `plot-analysis/`
+  - `writing-styles/`
+- 因为这些目录中的 `.md` 文件会被当成正式数据记录参与回转，额外文件可能破坏导入或校验。
+- 如果 AI 需要写额外说明、临时想法、草稿，请放在工作区根目录下的自定义目录里，例如：
+  - `_notes/`
+  - `_scratch/`
+  - `_drafts/`
+- 这些额外目录推荐以下划线或点开头；这类目录不会被识别成新的工作区。
+- `CLAUDE.md`、`AGENTS.md`、`GEMINI.md` 这类根目录说明文件可以保留，保存工作区时不会被脚本删除。
+- 修改字段时优先保留已有字段，不要删除 schema 中已经存在的字段。
+- 缺失字段会在转换时自动补默认值，但多余字段会导致校验失败。
+
 ## 格式约定
 
 - 每个 Markdown 文件都有 TOML frontmatter。
 - 长文本字段会展开为正文块。
 - 结构化数据会保留为 JSON 代码块。
 - 一些原本就是“JSON 字符串”的字段会以高保真方式保存，保证 `json -> md -> json` 尽量不失真。
+- 工作区会尽量把 schema 中的所有字段都 materialize 到 Markdown 中，避免回转时丢字段。
 
 ## 校验说明
 
@@ -153,6 +216,12 @@ Get-Content workspace/<folder>/chapters/ch-001-*.md
 - Markdown 工作区目录
 
 在 `md-to-json` 之前先跑一次 `validate`，可以更早发现字段缺失、类型错误或结构损坏。
+
+当前校验规则：
+
+- 缺失字段：不会直接报错，会按照 schema 自动补默认值、空字符串、空数组或空对象
+- 多余字段：会直接报错，无法通过校验
+- 顶层字段和各 section 记录字段都会检查
 
 ## 书籍 ID 说明
 

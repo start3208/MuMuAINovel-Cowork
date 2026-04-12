@@ -1,6 +1,7 @@
 # Workspace Studio
 
 独立的本地工作区前端，不依赖 MuMu 的登录页面。
+数据源是本地 Markdown 工作区，保存时会通过 `tools/mumu_workspace.py` 的同一套核心校验和写回逻辑同步到 md。
 
 ## 启动方式
 
@@ -28,6 +29,14 @@ python workspace-studio/start_studio.py
 - `backend/`：本地 API
 - `frontend/`：独立 React 前端源码
 - `frontend-dist/`：前端构建产物
+
+## 数据约定
+
+- `Workspace Studio` 不是通过调用命令行文本输出来保存数据，而是直接复用 `tools/mumu_workspace.py` 里的核心函数。
+- 前端修改后，后端会先做 schema 校验，再重写工作区的标准受管路径。
+- 工作区根目录下以下划线或点开头的自定义目录不会被识别成一本书。
+- 工作区根目录下的 `CLAUDE.md`、`AGENTS.md`、`GEMINI.md` 这类说明文件不会因为保存而被删除。
+- 建议把草稿、笔记、缓存放进 `_notes/`、`_drafts/`、`.cache/` 这类目录。
 
 ## 可选：前端开发模式
 

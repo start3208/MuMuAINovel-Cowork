@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import http.cookiejar
 import json
 import mimetypes
@@ -16,7 +17,8 @@ import urllib.request
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from types import UnionType
+from typing import Any, Union, get_args, get_origin
 
 import tomllib
 
@@ -27,11 +29,29 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from pydantic import ValidationError  # type: ignore
-from app.schemas.import_export import ProjectExportData  # type: ignore
+from app.schemas.import_export import (  # type: ignore
+    ChapterExportData,
+    CharacterCareerExportData,
+    CharacterExportData,
+    ForeshadowExportData,
+    GenerationHistoryExportData,
+    OrganizationExportData,
+    OrganizationMemberExportData,
+    OutlineExportData,
+    PlotAnalysisExportData,
+    ProjectDefaultStyleExportData,
+    ProjectExportData,
+    RelationshipExportData,
+    StoryMemoryExportData,
+    WritingStyleExportData,
+    CareerExportData,
+)  
 
 
 SUPPORTED_VERSIONS = {"1.0.0", "1.1.0", "1.2.0"}
 SINGLE_RECORD_SECTIONS = {"project", "project_default_style"}
+WORKSPACE_RESERVED_PREFIXES = (".", "_")
+WORKSPACE_EXCLUDED_ROOT_NAMES = {"backups"}
 TOP_LEVEL_ORDER = [
     "project",
     "chapters",
@@ -65,6 +85,10 @@ SECTION_PATHS = {
     "story_memories": Path("story-memories"),
     "plot_analysis": Path("plot-analysis"),
     "foreshadows": Path("foreshadows"),
+}
+WORKSPACE_MANAGED_ROOT_FILES = {
+    Path("README.md"),
+    Path(".mumu-workspace.toml"),
 }
 SECTION_FILE_PREFIX = {
     "chapters": "ch",
@@ -194,6 +218,66 @@ FIELD_MARKER_RE = re.compile(
     re.DOTALL,
 )
 
+TOP_LEVEL_FIELD_DEFAULTS = {
+    "version": "1.2.0",
+    "export_time": "",
+    "source_project_id": "",
+}
+PROJECT_ALLOWED_FIELDS = [
+    "title",
+    "description",
+    "theme",
+    "genre",
+    "target_words",
+    "current_words",
+    "status",
+    "world_time_period",
+    "world_location",
+    "world_atmosphere",
+    "world_rules",
+    "chapter_count",
+    "narrative_perspective",
+    "character_count",
+    "outline_mode",
+    "user_id",
+    "created_at",
+]
+PROJECT_FIELD_DEFAULTS = {
+    "title": "",
+    "description": "",
+    "theme": "",
+    "genre": "",
+    "target_words": 0,
+    "current_words": 0,
+    "status": "",
+    "world_time_period": "",
+    "world_location": "",
+    "world_atmosphere": "",
+    "world_rules": "",
+    "chapter_count": 0,
+    "narrative_perspective": "",
+    "character_count": 0,
+    "outline_mode": "",
+    "user_id": "",
+    "created_at": "",
+}
+SECTION_MODEL_MAP = {
+    "chapters": ChapterExportData,
+    "characters": CharacterExportData,
+    "outlines": OutlineExportData,
+    "relationships": RelationshipExportData,
+    "organizations": OrganizationExportData,
+    "organization_members": OrganizationMemberExportData,
+    "writing_styles": WritingStyleExportData,
+    "generation_history": GenerationHistoryExportData,
+    "careers": CareerExportData,
+    "character_careers": CharacterCareerExportData,
+    "story_memories": StoryMemoryExportData,
+    "plot_analysis": PlotAnalysisExportData,
+    "foreshadows": ForeshadowExportData,
+    "project_default_style": ProjectDefaultStyleExportData,
+}
+
 
 @dataclass(frozen=True)
 class ValidationSummary:
@@ -210,6 +294,180 @@ class MaterializedInput:
     json_path: Path
     data: dict[str, Any]
     temporary: bool = False
+
+
+def unwrap_optional(annotation: Any) -> Any:
+    origin = get_origin(annotation)
+    if origin is None:
+        return annotation
+    if origin not in (Union, UnionType):
+        return annotation
+    args = [arg for arg in get_args(annotation) if arg is not type(None)]
+    if len(args) == 1:
+        return args[0]
+    return annotation
+
+
+def default_for_annotation(annotation: Any) -> Any:
+    annotation = unwrap_optional(annotation)
+    origin = get_origin(annotation)
+
+    if origin in (list, tuple, set, frozenset):
+        return []
+    if origin is dict:
+        return {}
+
+    if annotation is str:
+        return ""
+    if annotation is int:
+        return 0
+    if annotation is float:
+        return 0.0
+    if annotation is bool:
+        return False
+
+    return ""
+
+
+def default_for_model_field(field: Any) -> Any:
+    if field.default_factory is not None:
+        return field.default_factory()
+    if field.default is not None and str(field.default) != "PydanticUndefined":
+        return copy.deepcopy(field.default)
+    return default_for_annotation(field.annotation)
+
+
+def normalize_value_for_annotation(annotation: Any, value: Any) -> Any:
+    annotation = unwrap_optional(annotation)
+    origin = get_origin(annotation)
+
+    if value is None:
+        return default_for_annotation(annotation)
+
+    if origin in (list, tuple, set, frozenset):
+        if value == "":
+            return []
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return []
+            try:
+                parsed = json.loads(stripped)
+                return parsed if isinstance(parsed, list) else []
+            except json.JSONDecodeError:
+                return [item.strip() for item in re.split(r"[，,、\n]", value) if item.strip()]
+        return []
+
+    if origin is dict:
+        if value == "":
+            return {}
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return {}
+            try:
+                parsed = json.loads(stripped)
+                return parsed if isinstance(parsed, dict) else {}
+            except json.JSONDecodeError:
+                return {}
+        return {}
+
+    if annotation is str:
+        return "" if value is None else str(value)
+    if annotation is int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+    if annotation is float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+    if annotation is bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    return value
+
+
+def normalize_project_dict(project: dict[str, Any] | None) -> tuple[dict[str, Any], list[str]]:
+    project = project or {}
+    errors: list[str] = []
+    extra_keys = sorted(set(project.keys()) - set(PROJECT_ALLOWED_FIELDS))
+    for key in extra_keys:
+        errors.append(f"project.{key}: extra field is not allowed")
+
+    normalized: dict[str, Any] = {}
+    for key in PROJECT_ALLOWED_FIELDS:
+        normalized[key] = copy.deepcopy(project.get(key, PROJECT_FIELD_DEFAULTS[key]))
+    return normalized, errors
+
+
+def normalize_model_record(section: str, record: dict[str, Any] | None) -> tuple[dict[str, Any], list[str]]:
+    model = SECTION_MODEL_MAP[section]
+    record = record or {}
+    errors: list[str] = []
+
+    allowed_fields = set(model.model_fields.keys())
+    extra_keys = sorted(set(record.keys()) - allowed_fields)
+    for key in extra_keys:
+        errors.append(f"{section}.{key}: extra field is not allowed")
+
+    normalized: dict[str, Any] = {}
+    for name, field in model.model_fields.items():
+        if name in record:
+            normalized[name] = normalize_value_for_annotation(field.annotation, copy.deepcopy(record[name]))
+        else:
+            normalized[name] = default_for_model_field(field)
+    return normalized, errors
+
+
+def normalize_export_dict(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    errors: list[str] = []
+    normalized: dict[str, Any] = {}
+
+    allowed_top_level = set(TOP_LEVEL_FIELD_DEFAULTS.keys()) | set(TOP_LEVEL_ORDER)
+    extra_top_level = sorted(set(data.keys()) - allowed_top_level)
+    for key in extra_top_level:
+        errors.append(f"{key}: extra top-level field is not allowed")
+
+    for key, default_value in TOP_LEVEL_FIELD_DEFAULTS.items():
+        normalized[key] = copy.deepcopy(data.get(key, default_value))
+
+    project_normalized, project_errors = normalize_project_dict(data.get("project"))
+    normalized["project"] = project_normalized
+    errors.extend(project_errors)
+
+    for section in TOP_LEVEL_ORDER:
+        if section == "project":
+            continue
+        if section in SINGLE_RECORD_SECTIONS:
+            section_normalized, section_errors = normalize_model_record(section, data.get(section))
+            normalized[section] = section_normalized
+            errors.extend(section_errors)
+            continue
+
+        source_records = data.get(section)
+        if not isinstance(source_records, list):
+            source_records = []
+        normalized_records = []
+        for index, record in enumerate(source_records):
+            record_normalized, record_errors = normalize_model_record(section, record)
+            normalized_records.append(record_normalized)
+            for error in record_errors:
+                suffix = error.split(".", 1)[-1]
+                errors.append(f"{section}[{index}].{suffix}")
+        normalized[section] = normalized_records
+
+    return normalized, errors
 
 
 def load_simple_env(env_path: Path) -> dict[str, str]:
@@ -505,6 +763,32 @@ def compact_label(value: str, max_length: int = 24) -> str:
     if len(label) > max_length:
         label = label[:max_length].rstrip("-_. ")
     return label or "untitled"
+
+
+def is_reserved_workspace_name(name: str) -> bool:
+    return bool(name) and name.startswith(WORKSPACE_RESERVED_PREFIXES)
+
+
+def is_workspace_directory(path: Path) -> bool:
+    return (
+        path.is_dir()
+        and not is_reserved_workspace_name(path.name)
+        and path.name not in WORKSPACE_EXCLUDED_ROOT_NAMES
+        and (path / ".mumu-workspace.toml").exists()
+    )
+
+
+def managed_workspace_paths() -> list[Path]:
+    return [*WORKSPACE_MANAGED_ROOT_FILES, *(SECTION_PATHS[section] for section in TOP_LEVEL_ORDER)]
+
+
+def clear_managed_workspace_paths(output_dir: Path) -> None:
+    for relative_path in managed_workspace_paths():
+        target = output_dir / relative_path
+        if target.is_dir():
+            shutil.rmtree(target)
+        elif target.is_file() or target.is_symlink():
+            target.unlink()
 
 
 def dump_toml_value(value: Any) -> str:
@@ -807,6 +1091,7 @@ def build_generic_readme_text() -> str:
         7. 把新 JSON 导回 MuMuAINovel。
 
         如果你不想打开前端页面，也可以直接用同一个脚本列项目、导出、导入、严格同步。
+        `Workspace Studio` 也是直接复用这套核心读写与校验逻辑，不是另走一套独立格式。
 
         ## 后端直连命令
 
@@ -882,12 +1167,46 @@ def build_generic_readme_text() -> str:
         - 代码块里的 JSON 结构也可以直接改。
         - 文件名本身不是导入依据，导入依据是文件内容；所以一般不需要手动改文件名。
 
+        ## 保留与忽略规则
+
+        保存工作区时，脚本和 `Workspace Studio` 只会重写“标准受管路径”，不会整目录清空。
+
+        会被脚本重写的标准路径包括：
+
+        - `README.md`
+        - `.mumu-workspace.toml`
+        - `project.md`
+        - `project-default-style.md`
+        - `chapters/`
+        - `characters/`
+        - `outlines/`
+        - `relationships/`
+        - `organizations/`
+        - `organization-members/`
+        - `careers/`
+        - `character-careers/`
+        - `foreshadows/`
+        - `generation-history/`
+        - `story-memories/`
+        - `plot-analysis/`
+        - `writing-styles/`
+
+        下列内容默认会被保留，不会因为保存工作区而被删除：
+
+        - 工作区根目录下自定义的 `_notes/`、`_drafts/`、`.cache/` 这类以下划线或点开头的目录
+        - 工作区根目录下不属于标准受管路径的自定义文件
+        - `CLAUDE.md`、`AGENTS.md`、`GEMINI.md` 这类 AI 协作说明文件
+
+        同时，工作目录下以下划线或点开头的目录不会被识别为一本书或一个工作区。
+        建议把草稿、说明、缓存都放进这些目录里。
+
         ## 格式约定
 
         - 每个 Markdown 文件都有 TOML frontmatter。
         - 长文本字段会展开为正文块。
         - 结构化数据会保留为 JSON 代码块。
         - 一些原本就是“JSON 字符串”的字段会以高保真方式保存，保证 `json -> md -> json` 尽量不失真。
+        - 工作区会尽量把 schema 中的所有字段都 materialize 到 Markdown 中，避免回转时丢字段。
 
         ## 校验说明
 
@@ -897,6 +1216,12 @@ def build_generic_readme_text() -> str:
         - Markdown 工作区目录
 
         在 `md-to-json` 之前先跑一次 `validate`，可以更早发现字段缺失、类型错误或结构损坏。
+
+        当前校验规则：
+
+        - 缺失字段：不会直接报错，会按照 schema 自动补默认值、空字符串、空数组或空对象
+        - 多余字段：会直接报错，无法通过校验
+        - 顶层字段和各 section 记录字段都会检查
 
         ## 书籍 ID 说明
 
@@ -953,23 +1278,28 @@ def write_workspace_from_data(
     force: bool,
     source_json: Path | None = None,
 ) -> Path:
-    validation = validate_export_dict(data)
-    if not validation.valid:
+    normalized_data, normalization_errors = normalize_export_dict(data)
+    validation = validate_export_dict(normalized_data)
+    combined_errors = list(validation.errors)
+    for error in normalization_errors:
+        if error not in combined_errors:
+            combined_errors.append(error)
+    if combined_errors:
         raise ValueError("input JSON is not a valid MuMuAINovel export")
 
     if output_dir.exists():
         if not force:
             raise FileExistsError(f"output directory already exists: {output_dir}")
-        shutil.rmtree(output_dir)
+        if not output_dir.is_dir():
+            raise NotADirectoryError(f"output path is not a directory: {output_dir}")
+        clear_managed_workspace_paths(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    write_workspace_meta(output_dir, source_json or Path("<generated>"), data)
-    write_workspace_readme(output_dir, data)
+    write_workspace_meta(output_dir, source_json or Path("<generated>"), normalized_data)
+    write_workspace_readme(output_dir, normalized_data)
 
     for section in TOP_LEVEL_ORDER:
-        if section not in data:
-            continue
-        section_value = data[section]
+        section_value = normalized_data[section]
         target = output_dir / SECTION_PATHS[section]
 
         if section in SINGLE_RECORD_SECTIONS:
@@ -1051,7 +1381,8 @@ def workspace_to_export_dict(workspace_dir: Path) -> dict[str, Any]:
         )
         data[section] = [parse_record_markdown(file_path) for file_path in files]
 
-    return data
+    normalized, _ = normalize_export_dict(data)
+    return normalized
 
 
 def write_export_json(output_json: Path, data: dict[str, Any]) -> None:
@@ -1065,16 +1396,18 @@ def write_export_json(output_json: Path, data: dict[str, Any]) -> None:
 def validate_export_dict(data: dict[str, Any]) -> ValidationSummary:
     errors: list[str] = []
     warnings: list[str] = []
+    normalized, normalization_errors = normalize_export_dict(data)
+    errors.extend(normalization_errors)
 
     try:
-        ProjectExportData.model_validate(data)
+        ProjectExportData.model_validate(normalized)
     except ValidationError as exc:
         for issue in exc.errors():
             location = ".".join(str(item) for item in issue.get("loc", ()))
             message = issue.get("msg", "validation error")
             errors.append(f"{location}: {message}")
 
-    version = data.get("version", "")
+    version = normalized.get("version", "")
     if not version:
         errors.append("missing version")
     elif version not in SUPPORTED_VERSIONS:
@@ -1082,27 +1415,27 @@ def validate_export_dict(data: dict[str, Any]) -> ValidationSummary:
             f"version mismatch: {version} not in supported versions {sorted(SUPPORTED_VERSIONS)}"
         )
 
-    project = data.get("project")
+    project = normalized.get("project")
     if not project:
         errors.append("missing project")
     elif not project.get("title"):
-        errors.append("project.title must not be empty")
+        warnings.append("project.title is empty")
 
     statistics = {
-        "chapters": len(data.get("chapters", [])),
-        "characters": len(data.get("characters", [])),
-        "outlines": len(data.get("outlines", [])),
-        "relationships": len(data.get("relationships", [])),
-        "organizations": len(data.get("organizations", [])),
-        "organization_members": len(data.get("organization_members", [])),
-        "writing_styles": len(data.get("writing_styles", [])),
-        "generation_history": len(data.get("generation_history", [])),
-        "careers": len(data.get("careers", [])),
-        "character_careers": len(data.get("character_careers", [])),
-        "story_memories": len(data.get("story_memories", [])),
-        "plot_analysis": len(data.get("plot_analysis", [])),
-        "foreshadows": len(data.get("foreshadows", [])),
-        "has_default_style": 1 if data.get("project_default_style") else 0,
+        "chapters": len(normalized.get("chapters", [])),
+        "characters": len(normalized.get("characters", [])),
+        "outlines": len(normalized.get("outlines", [])),
+        "relationships": len(normalized.get("relationships", [])),
+        "organizations": len(normalized.get("organizations", [])),
+        "organization_members": len(normalized.get("organization_members", [])),
+        "writing_styles": len(normalized.get("writing_styles", [])),
+        "generation_history": len(normalized.get("generation_history", [])),
+        "careers": len(normalized.get("careers", [])),
+        "character_careers": len(normalized.get("character_careers", [])),
+        "story_memories": len(normalized.get("story_memories", [])),
+        "plot_analysis": len(normalized.get("plot_analysis", [])),
+        "foreshadows": len(normalized.get("foreshadows", [])),
+        "has_default_style": 1 if normalized.get("project_default_style") else 0,
     }
 
     if statistics["chapters"] == 0:

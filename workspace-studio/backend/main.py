@@ -24,6 +24,8 @@ from tools.mumu_workspace import (  # noqa: E402
     default_base_url,
     default_local_auth,
     export_json_to_workspace,
+    is_reserved_workspace_name,
+    is_workspace_directory,
     validate_export_dict,
     workspace_to_export_dict,
     write_export_json,
@@ -64,6 +66,8 @@ def ensure_workspace_name(name: str) -> str:
     cleaned = compact_label(name, max_length=60)
     if not cleaned:
         raise HTTPException(status_code=400, detail="无效的工作区名称")
+    if is_reserved_workspace_name(cleaned):
+        raise HTTPException(status_code=400, detail="工作区名称不能以下划线或点开头")
     return cleaned
 
 
@@ -74,7 +78,7 @@ def workspace_dir(name: str) -> Path:
 
 def workspace_exists(name: str) -> bool:
     target = workspace_dir(name)
-    return (target / ".mumu-workspace.toml").exists()
+    return is_workspace_directory(target)
 
 
 def list_workspace_names() -> list[str]:
@@ -82,11 +86,7 @@ def list_workspace_names() -> list[str]:
         return []
     names: list[str] = []
     for item in WORKSPACE_ROOT.iterdir():
-        if not item.is_dir():
-            continue
-        if item.name in {"_exports", "backups", ".tmp"}:
-            continue
-        if (item / ".mumu-workspace.toml").exists():
+        if is_workspace_directory(item):
             names.append(item.name)
     return sorted(names)
 
