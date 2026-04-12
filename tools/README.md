@@ -62,7 +62,7 @@
 6. 再运行 `md-to-json` 生成回转 JSON。
 7. 把新 JSON 导回 MuMuAINovel。
 
-如果你不想打开前端页面，也可以直接用同一个脚本列项目、导出、导入。
+如果你不想打开前端页面，也可以直接用同一个脚本列项目、导出、导入、严格同步。
 
 ## 后端直连命令
 
@@ -98,6 +98,27 @@ python tools/mumu_workspace.py export-project <project_id> output.json
 python tools/mumu_workspace.py import-project output.json
 python tools/mumu_workspace.py sync-project <target_project_id> output.json
 ```
+
+## 命令说明
+
+- `json-to-md <export.json> <workspace_dir>`
+  把 MuMuAINovel 导出的 JSON 转成 Markdown 工作区，适合在 Claude Code 中编辑。
+- `validate <path>`
+  校验输入内容是否合法。
+  `path` 可以是 JSON 文件，也可以是 Markdown 工作区目录。
+- `md-to-json <workspace_dir> <output.json>`
+  把 Markdown 工作区重新组装成可导回 MuMuAINovel 的 JSON。
+- `list-projects`
+  连接本地后端，列出当前账号下所有书籍及其 `project_id`。
+- `export-project <project_id> <output.json>`
+  直接按项目 ID 从本地后端导出书籍。
+  导出文件会附带 `source_project_id`，便于后续严格同步。
+- `import-project <input_path>`
+  导入 JSON 或工作区目录为一个新项目。
+  这个命令不会覆盖已有项目。
+- `sync-project <target_project_id> <input_path>`
+  严格同步到指定书籍。
+  会先校验、再备份、最后覆盖目标项目内容。
 
 ## 导航建议
 
