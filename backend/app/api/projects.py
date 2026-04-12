@@ -647,7 +647,7 @@ async def export_project_data(
         )
         
         # 转换为JSON
-        json_content = export_data.model_dump_json(indent=2, exclude_none=True, by_alias=True)
+        json_content = export_data.model_dump_json(indent=2, exclude_none=False, by_alias=True)
         
         # 生成文件名
         safe_title = "".join(c for c in project.title if c.isalnum() or c in (' ', '-', '_'))
