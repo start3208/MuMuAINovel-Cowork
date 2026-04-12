@@ -1,5 +1,5 @@
 """项目管理API"""
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request, Form
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, delete
@@ -778,3 +778,64 @@ async def import_project(
     except Exception as e:
         logger.error(f"导入项目失败: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"导入失败: {str(e)}")
+
+
+@router.post("/{project_id}/sync-import", response_model=ImportResult, summary="同步导入到指定项目")
+async def sync_project_import(
+    project_id: str,
+    file: UploadFile = File(...),
+    strict_source_match: bool = Form(True),
+    request: Request = None,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    将导入文件同步到指定项目，保留目标项目ID。
+
+    默认启用严格校验：
+    - 文件必须包含 source_project_id
+    - source_project_id 必须与目标 project_id 一致
+    """
+    try:
+        user_id = getattr(request.state, 'user_id', None)
+        if not user_id:
+            logger.warning("未登录用户尝试同步项目")
+            raise HTTPException(status_code=401, detail="未登录")
+
+        logger.info(
+            f"开始同步导入项目: target_project_id={project_id}, file={file.filename}, "
+            f"user_id={user_id}, strict_source_match={strict_source_match}"
+        )
+
+        if not file.filename.endswith('.json'):
+            raise HTTPException(status_code=400, detail="只支持JSON格式文件")
+
+        content = await file.read()
+        max_size = 50 * 1024 * 1024
+        if len(content) > max_size:
+            raise HTTPException(status_code=413, detail="文件大小超过50MB限制")
+
+        try:
+            data = json.loads(content.decode('utf-8'))
+        except json.JSONDecodeError as e:
+            raise HTTPException(status_code=400, detail=f"无效的JSON格式: {str(e)}")
+
+        sync_result = await ImportExportService.sync_project(
+            target_project_id=project_id,
+            data=data,
+            db=db,
+            user_id=user_id,
+            strict_source_match=strict_source_match
+        )
+
+        if sync_result.success:
+            logger.info(f"项目同步成功: {sync_result.project_id}")
+        else:
+            logger.warning(f"项目同步失败: {sync_result.message}")
+
+        return sync_result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"同步导入项目失败: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"同步失败: {str(e)}")

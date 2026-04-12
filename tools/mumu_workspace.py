@@ -7,7 +7,9 @@ import mimetypes
 import re
 import shutil
 import sys
+import tempfile
 import textwrap
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -203,6 +205,13 @@ class ValidationSummary:
     warnings: list[str]
 
 
+@dataclass
+class MaterializedInput:
+    json_path: Path
+    data: dict[str, Any]
+    temporary: bool = False
+
+
 def load_simple_env(env_path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     if not env_path.exists():
@@ -263,6 +272,20 @@ class LocalAPIClient:
             return path
         return f"{self.base_url}{path}"
 
+    def _open_with_retry(self, request: urllib.request.Request):
+        attempts = 5
+        delay = 0.6
+        last_error: Exception | None = None
+        for _ in range(attempts):
+            try:
+                return self.opener.open(request)
+            except urllib.error.URLError as exc:
+                last_error = exc
+                time.sleep(delay)
+        if last_error:
+            raise last_error
+        raise RuntimeError("request failed without an explicit error")
+
     def request_json(
         self,
         path: str,
@@ -286,7 +309,7 @@ class LocalAPIClient:
             method=method,
         )
         try:
-            with self.opener.open(request) as response:
+            with self._open_with_retry(request) as response:
                 raw = response.read().decode("utf-8")
                 return json.loads(raw), response.headers
         except urllib.error.HTTPError as exc:
@@ -315,7 +338,7 @@ class LocalAPIClient:
             method=method,
         )
         try:
-            with self.opener.open(request) as response:
+            with self._open_with_retry(request) as response:
                 return response.read(), response.headers
         except urllib.error.HTTPError as exc:
             raise RuntimeError(decode_http_error(exc)) from exc
@@ -325,6 +348,7 @@ class LocalAPIClient:
         path: str,
         file_path: Path | str,
         field_name: str = "file",
+        fields: dict[str, Any] | None = None,
     ) -> Any:
         file_path = Path(file_path)
         boundary = f"----MuMuBoundary{uuid.uuid4().hex}"
@@ -334,6 +358,12 @@ class LocalAPIClient:
 
         def write_text(text: str) -> None:
             body.extend(text.encode("utf-8"))
+
+        if fields:
+            for key, value in fields.items():
+                write_text(f"--{boundary}\r\n")
+                write_text(f'Content-Disposition: form-data; name="{key}"\r\n\r\n')
+                write_text(f"{value}\r\n")
 
         write_text(f"--{boundary}\r\n")
         write_text(
@@ -354,7 +384,7 @@ class LocalAPIClient:
             method="POST",
         )
         try:
-            with self.opener.open(request) as response:
+            with self._open_with_retry(request) as response:
                 raw = response.read().decode("utf-8")
                 return json.loads(raw)
         except urllib.error.HTTPError as exc:
@@ -387,6 +417,37 @@ def derive_export_filename(headers: Any, project_id: str) -> str:
         return urllib.parse.unquote(match.group(1))
     fallback = f"project_{project_id}.json"
     return fallback
+
+
+def materialize_input(input_path: Path) -> MaterializedInput:
+    input_path = input_path.resolve()
+    if input_path.is_dir():
+        data = workspace_to_export_dict(input_path)
+        summary = validate_export_dict(data)
+        if not summary.valid:
+            raise ValueError("工作区校验失败，无法继续上传或同步")
+        temp_dir = REPO_ROOT / "workspace" / ".tmp"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        temp_file = Path(
+            tempfile.mkstemp(prefix="mumu-upload-", suffix=".json", dir=str(temp_dir))[1]
+        )
+        write_export_json(temp_file, data)
+        return MaterializedInput(json_path=temp_file, data=data, temporary=True)
+
+    data = json.loads(input_path.read_text(encoding="utf-8"))
+    summary = validate_export_dict(data)
+    if not summary.valid:
+        raise ValueError("JSON 校验失败，无法继续上传或同步")
+    return MaterializedInput(json_path=input_path, data=data, temporary=False)
+
+
+def cleanup_materialized_input(materialized: MaterializedInput) -> None:
+    if materialized.temporary and materialized.json_path.exists():
+        try:
+            materialized.json_path.unlink()
+        except PermissionError:
+            # Windows 下上传请求刚结束时文件句柄可能仍在释放中，留给后续清理即可。
+            pass
 
 
 def print_projects_table(items: list[dict[str, Any]]) -> None:
@@ -745,7 +806,7 @@ def build_generic_readme_text() -> str:
         6. 再运行 `md-to-json` 生成回转 JSON。
         7. 把新 JSON 导回 MuMuAINovel。
 
-        如果你不想打开前端页面，也可以直接用同一个脚本列项目、导出、导入。
+        如果你不想打开前端页面，也可以直接用同一个脚本列项目、导出、导入、严格同步。
 
         ## 后端直连命令
 
@@ -753,6 +814,7 @@ def build_generic_readme_text() -> str:
         python tools/mumu_workspace.py list-projects
         python tools/mumu_workspace.py export-project <project_id> output.json
         python tools/mumu_workspace.py import-project output.json
+        python tools/mumu_workspace.py sync-project <target_project_id> output.json
         ```
 
         默认会读取 `backend/.env` 中的：
@@ -778,6 +840,7 @@ def build_generic_readme_text() -> str:
         python tools/mumu_workspace.py list-projects
         python tools/mumu_workspace.py export-project <project_id> output.json
         python tools/mumu_workspace.py import-project output.json
+        python tools/mumu_workspace.py sync-project <target_project_id> output.json
         ```
 
         ## 导航建议
@@ -819,6 +882,26 @@ def build_generic_readme_text() -> str:
         - `list-projects` 会直接打印项目 ID，便于定位书籍。
         - `export-project` 导出的 JSON 顶层会额外包含 `source_project_id`。
         - 生成的工作区元数据 `.mumu-workspace.toml` 也会保留这个来源项目 ID。
+
+        ## 严格同步说明
+
+        `sync-project` 会执行严格校验，避免把错误内容同步到错误书籍：
+
+        - 先做本地结构校验
+        - 再调用服务端 `/validate-import`
+        - 要求输入里必须存在 `source_project_id`
+        - 要求 `source_project_id` 与目标 `target_project_id` 完全一致
+        - 正式同步前会自动导出目标书籍备份到 `workspace/backups/`
+
+        推荐用法：
+
+        ```powershell
+        python tools/mumu_workspace.py list-projects
+        python tools/mumu_workspace.py export-project <project_id> workspace/book.json
+        python tools/mumu_workspace.py json-to-md workspace/book.json workspace/book-workspace
+        python tools/mumu_workspace.py validate workspace/book-workspace
+        python tools/mumu_workspace.py sync-project <project_id> workspace/book-workspace
+        ```
         """
     )
 
@@ -1065,11 +1148,18 @@ def build_parser() -> argparse.ArgumentParser:
     export_project.add_argument("--no-foreshadows", action="store_true", help="exclude foreshadows")
 
     import_project = subparsers.add_parser("import-project", help="import a project JSON directly into the local backend")
-    import_project.add_argument("input_json", type=Path)
+    import_project.add_argument("input_path", type=Path, help="JSON file or Markdown workspace directory")
     import_project.add_argument("--base-url", default=None, help="backend base URL, default reads backend/.env")
     import_project.add_argument("--username", default=None, help="local auth username, default reads backend/.env")
     import_project.add_argument("--password", default=None, help="local auth password, default reads backend/.env")
-    import_project.add_argument("--skip-validate", action="store_true", help="skip calling /validate-import before import")
+
+    sync_project = subparsers.add_parser("sync-project", help="strictly sync JSON or workspace into a specific existing project")
+    sync_project.add_argument("target_project_id", help="target MuMuAINovel project id")
+    sync_project.add_argument("input_path", type=Path, help="JSON file or Markdown workspace directory")
+    sync_project.add_argument("--base-url", default=None, help="backend base URL, default reads backend/.env")
+    sync_project.add_argument("--username", default=None, help="local auth username, default reads backend/.env")
+    sync_project.add_argument("--password", default=None, help="local auth password, default reads backend/.env")
+    sync_project.add_argument("--backup-dir", type=Path, default=REPO_ROOT / "workspace" / "backups", help="backup directory before sync")
 
     return parser
 
@@ -1143,22 +1233,87 @@ def main() -> int:
         return 0
 
     if args.command == "import-project":
-        input_json = args.input_json.resolve()
         base_url, username, password = resolve_api_credentials(args)
         client = LocalAPIClient(base_url, username, password)
         client.login()
+        materialized = materialize_input(args.input_path)
+        try:
+            local_summary = validate_export_dict(materialized.data)
+            print("本地校验结果:")
+            print_validation(local_summary, str(args.input_path.resolve()))
+            if not local_summary.valid:
+                return 1
 
-        if not args.skip_validate:
-            validation = client.upload_file_json("/api/projects/validate-import", input_json)
-            print("导入前校验结果:")
+            validation = client.upload_file_json("/api/projects/validate-import", materialized.json_path)
+            print("服务端校验结果:")
             print(json.dumps(validation, ensure_ascii=False, indent=2))
             if not validation.get("valid"):
                 return 1
 
-        result = client.upload_file_json("/api/projects/import", input_json)
-        print("导入结果:")
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0 if result.get("success") else 1
+            result = client.upload_file_json("/api/projects/import", materialized.json_path)
+            print("导入结果:")
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0 if result.get("success") else 1
+        finally:
+            cleanup_materialized_input(materialized)
+
+    if args.command == "sync-project":
+        base_url, username, password = resolve_api_credentials(args)
+        client = LocalAPIClient(base_url, username, password)
+        client.login()
+        materialized = materialize_input(args.input_path)
+        try:
+            local_summary = validate_export_dict(materialized.data)
+            print("本地校验结果:")
+            print_validation(local_summary, str(args.input_path.resolve()))
+            if not local_summary.valid:
+                return 1
+
+            source_project_id = materialized.data.get("source_project_id")
+            if not source_project_id:
+                print("严格同步失败：输入缺少 source_project_id。")
+                return 1
+            if source_project_id != args.target_project_id:
+                print(
+                    "严格同步失败："
+                    f"source_project_id={source_project_id} 与目标项目ID={args.target_project_id} 不一致。"
+                )
+                return 1
+
+            validation = client.upload_file_json("/api/projects/validate-import", materialized.json_path)
+            print("服务端校验结果:")
+            print(json.dumps(validation, ensure_ascii=False, indent=2))
+            if not validation.get("valid"):
+                return 1
+
+            args.backup_dir.mkdir(parents=True, exist_ok=True)
+            backup_path = args.backup_dir / f"backup-{args.target_project_id}.json"
+            backup_options = {
+                "include_generation_history": True,
+                "include_writing_styles": True,
+                "include_careers": True,
+                "include_memories": True,
+                "include_plot_analysis": True,
+                "include_foreshadows": True,
+            }
+            backup_content, _ = client.request_bytes(
+                f"/api/projects/{args.target_project_id}/export-data",
+                method="POST",
+                payload=backup_options,
+            )
+            backup_path.write_bytes(backup_content)
+            print(f"已创建同步前备份: {backup_path}")
+
+            result = client.upload_file_json(
+                f"/api/projects/{args.target_project_id}/sync-import",
+                materialized.json_path,
+                fields={"strict_source_match": "true"},
+            )
+            print("同步结果:")
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0 if result.get("success") else 1
+        finally:
+            cleanup_materialized_input(materialized)
 
     parser.error("unknown command")
     return 2

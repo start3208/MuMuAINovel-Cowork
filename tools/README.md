@@ -7,6 +7,7 @@
 - 列出项目与书籍 ID
 - 按项目 ID 导出 JSON
 - 直接导入 JSON
+- 严格同步到指定书籍
 
 ## 适用场景
 
@@ -69,6 +70,7 @@
 python tools/mumu_workspace.py list-projects
 python tools/mumu_workspace.py export-project <project_id> output.json
 python tools/mumu_workspace.py import-project output.json
+python tools/mumu_workspace.py sync-project <target_project_id> output.json
 ```
 
 默认会读取 `backend/.env` 中的：
@@ -94,6 +96,7 @@ python tools/mumu_workspace.py validate output.json
 python tools/mumu_workspace.py list-projects
 python tools/mumu_workspace.py export-project <project_id> output.json
 python tools/mumu_workspace.py import-project output.json
+python tools/mumu_workspace.py sync-project <target_project_id> output.json
 ```
 
 ## 导航建议
@@ -135,3 +138,23 @@ Get-Content workspace/<folder>/chapters/ch-001-*.md
 - `list-projects` 会直接打印项目 ID，便于定位书籍。
 - `export-project` 导出的 JSON 顶层会额外包含 `source_project_id`。
 - 生成的工作区元数据 `.mumu-workspace.toml` 也会保留这个来源项目 ID。
+
+## 严格同步说明
+
+`sync-project` 会执行严格校验，避免把错误内容同步到错误书籍：
+
+- 先做本地结构校验
+- 再调用服务端 `/validate-import`
+- 要求输入里必须存在 `source_project_id`
+- 要求 `source_project_id` 与目标 `target_project_id` 完全一致
+- 正式同步前会自动导出目标书籍备份到 `workspace/backups/`
+
+推荐用法：
+
+```powershell
+python tools/mumu_workspace.py list-projects
+python tools/mumu_workspace.py export-project <project_id> workspace\book.json
+python tools/mumu_workspace.py json-to-md workspace\book.json workspace\book-workspace
+python tools/mumu_workspace.py validate workspace\book-workspace
+python tools/mumu_workspace.py sync-project <project_id> workspace\book-workspace
+```

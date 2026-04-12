@@ -3,7 +3,7 @@ import json
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, or_
+from sqlalchemy import select, or_, delete
 from app.models.project import Project
 from app.models.chapter import Chapter
 from app.models.character import Character
@@ -14,6 +14,7 @@ from app.models.generation_history import GenerationHistory
 from app.models.career import Career, CharacterCareer
 from app.models.memory import StoryMemory, PlotAnalysis
 from app.models.analysis_task import AnalysisTask
+from app.models.batch_generation_task import BatchGenerationTask
 from app.models.foreshadow import Foreshadow
 from app.models.project_default_style import ProjectDefaultStyle
 from app.schemas.import_export import (
@@ -35,6 +36,7 @@ from app.schemas.import_export import (
     ImportValidationResult,
     ImportResult
 )
+from app.services.memory_service import memory_service
 from app.logger import get_logger
 
 logger = get_logger(__name__)
@@ -45,6 +47,105 @@ class ImportExportService:
     
     SUPPORTED_VERSIONS = ["1.0.0", "1.1.0", "1.2.0"]  # 支持的版本列表
     CURRENT_VERSION = "1.2.0"  # 当前导出版本
+
+    @staticmethod
+    def _apply_project_fields(target_project: Project, project_data: Dict[str, Any]) -> None:
+        """将导入数据应用到项目主记录"""
+        target_project.title = project_data.get("title")
+        target_project.description = project_data.get("description")
+        target_project.theme = project_data.get("theme")
+        target_project.genre = project_data.get("genre")
+        target_project.target_words = project_data.get("target_words")
+        target_project.status = project_data.get("status", "planning")
+        target_project.world_time_period = project_data.get("world_time_period")
+        target_project.world_location = project_data.get("world_location")
+        target_project.world_atmosphere = project_data.get("world_atmosphere")
+        target_project.world_rules = project_data.get("world_rules")
+        target_project.chapter_count = project_data.get("chapter_count")
+        target_project.narrative_perspective = project_data.get("narrative_perspective")
+        target_project.character_count = project_data.get("character_count")
+        target_project.outline_mode = project_data.get("outline_mode", "one-to-many")
+        target_project.current_words = project_data.get("current_words", 0)
+        target_project.wizard_step = 4
+        target_project.wizard_status = "completed"
+
+    @staticmethod
+    async def _clear_project_related_data(
+        project_id: str,
+        db: AsyncSession,
+        user_id: Optional[str] = None
+    ) -> None:
+        """清空项目关联数据，但保留项目主记录"""
+        if user_id:
+            try:
+                await memory_service.delete_project_memories(user_id, project_id)
+                logger.info(f"✅ 同步前已清理项目 {project_id[:8]} 的向量记忆")
+            except Exception as exc:
+                logger.warning(f"⚠️ 同步前清理向量记忆失败（继续同步）: {exc}")
+
+        relationships_result = await db.execute(
+            delete(CharacterRelationship).where(CharacterRelationship.project_id == project_id)
+        )
+        logger.debug(f"同步清理角色关系数: {relationships_result.rowcount}")
+
+        orgs_result = await db.execute(
+            select(Organization).where(Organization.project_id == project_id)
+        )
+        orgs = orgs_result.scalars().all()
+        for org in orgs:
+            await db.execute(
+                delete(OrganizationMember).where(OrganizationMember.organization_id == org.id)
+            )
+        await db.execute(delete(Organization).where(Organization.project_id == project_id))
+
+        await db.execute(delete(ProjectDefaultStyle).where(ProjectDefaultStyle.project_id == project_id))
+        await db.execute(delete(GenerationHistory).where(GenerationHistory.project_id == project_id))
+        await db.execute(delete(AnalysisTask).where(AnalysisTask.project_id == project_id))
+        await db.execute(delete(BatchGenerationTask).where(BatchGenerationTask.project_id == project_id))
+        await db.execute(delete(PlotAnalysis).where(PlotAnalysis.project_id == project_id))
+        await db.execute(delete(StoryMemory).where(StoryMemory.project_id == project_id))
+
+        characters_query = await db.execute(
+            select(Character.id).where(Character.project_id == project_id)
+        )
+        character_ids = [row[0] for row in characters_query.fetchall()]
+        if character_ids:
+            await db.execute(delete(CharacterCareer).where(CharacterCareer.character_id.in_(character_ids)))
+
+        await db.execute(delete(Career).where(Career.project_id == project_id))
+        await db.execute(delete(Chapter).where(Chapter.project_id == project_id))
+        await db.execute(delete(Outline).where(Outline.project_id == project_id))
+        await db.execute(delete(Character).where(Character.project_id == project_id))
+        await db.execute(delete(Foreshadow).where(Foreshadow.project_id == project_id))
+
+    @staticmethod
+    async def _import_generation_history(
+        project_id: str,
+        history_data: List[Dict],
+        chapter_mapping: Dict[str, str],
+        db: AsyncSession
+    ) -> int:
+        """导入生成历史"""
+        count = 0
+        for item in history_data:
+            chapter_id = None
+            chapter_title = item.get("chapter_title")
+            if chapter_title and chapter_title in chapter_mapping:
+                chapter_id = chapter_mapping[chapter_title]
+
+            history = GenerationHistory(
+                project_id=project_id,
+                chapter_id=chapter_id,
+                prompt=item.get("prompt"),
+                generated_content=item.get("generated_content"),
+                model=item.get("model"),
+                tokens_used=item.get("tokens_used"),
+                generation_time=item.get("generation_time"),
+                created_at=ImportExportService._parse_optional_datetime(item.get("created_at")),
+            )
+            db.add(history)
+            count += 1
+        return count
     
     @staticmethod
     async def export_project(
@@ -782,26 +883,8 @@ class ImportExportService:
             
             # 创建项目
             project_data = data["project"]
-            new_project = Project(
-                user_id=user_id,  # 设置为当前用户ID
-                title=project_data.get("title"),
-                description=project_data.get("description"),
-                theme=project_data.get("theme"),
-                genre=project_data.get("genre"),
-                target_words=project_data.get("target_words"),
-                status=project_data.get("status", "planning"),
-                world_time_period=project_data.get("world_time_period"),
-                world_location=project_data.get("world_location"),
-                world_atmosphere=project_data.get("world_atmosphere"),
-                world_rules=project_data.get("world_rules"),
-                chapter_count=project_data.get("chapter_count"),
-                narrative_perspective=project_data.get("narrative_perspective"),
-                character_count=project_data.get("character_count"),
-                outline_mode=project_data.get("outline_mode", "one-to-many"),  # ✅ 导入大纲模式，默认为一对多
-                current_words=project_data.get("current_words", 0),  # 保留原项目的字数
-                wizard_step=4,  # 导入的项目设置为向导完成状态
-                wizard_status="completed"  # 标记向导已完成
-            )
+            new_project = Project(user_id=user_id)
+            ImportExportService._apply_project_fields(new_project, project_data)
             db.add(new_project)
             await db.flush()  # 获取project_id
             
@@ -885,6 +968,12 @@ class ImportExportService:
             for ch in imported_chapters:
                 if ch.chapter_number is not None and ch.chapter_number not in chapter_number_to_id:
                     chapter_number_to_id[ch.chapter_number] = ch.id
+
+            history_count = await ImportExportService._import_generation_history(
+                new_project.id, data.get("generation_history", []), chapter_title_to_id, db
+            )
+            statistics["generation_history"] = history_count
+            logger.info(f"导入生成历史数: {history_count}")
             
             memories_count = await ImportExportService._import_story_memories(
                 new_project.id, data.get("story_memories", []), chapter_title_to_id, char_mapping, db
@@ -941,6 +1030,193 @@ class ImportExportService:
             return ImportResult(
                 success=False,
                 message=f"导入失败: {str(e)}",
+                statistics=statistics,
+                warnings=warnings
+            )
+
+    @staticmethod
+    async def sync_project(
+        target_project_id: str,
+        data: Dict,
+        db: AsyncSession,
+        user_id: str,
+        strict_source_match: bool = True
+    ) -> ImportResult:
+        """
+        同步导入到指定项目（保留项目ID，覆盖项目内容）
+        """
+        warnings: List[str] = []
+        statistics: Dict[str, int] = {}
+
+        try:
+            validation = ImportExportService.validate_import_data(data)
+            if not validation.valid:
+                return ImportResult(
+                    success=False,
+                    message=f"数据验证失败: {', '.join(validation.errors)}",
+                    statistics={},
+                    warnings=validation.warnings
+                )
+
+            warnings.extend(validation.warnings)
+
+            result = await db.execute(
+                select(Project).where(
+                    Project.id == target_project_id,
+                    Project.user_id == user_id
+                )
+            )
+            target_project = result.scalar_one_or_none()
+            if not target_project:
+                return ImportResult(
+                    success=False,
+                    message="目标项目不存在或无权访问",
+                    statistics={},
+                    warnings=warnings
+                )
+
+            source_project_id = data.get("source_project_id")
+            if strict_source_match:
+                if not source_project_id:
+                    return ImportResult(
+                        success=False,
+                        message="严格同步失败：导入文件缺少 source_project_id",
+                        statistics={},
+                        warnings=warnings
+                    )
+                if source_project_id != target_project_id:
+                    return ImportResult(
+                        success=False,
+                        message=(
+                            f"严格同步失败：source_project_id={source_project_id} "
+                            f"与目标项目ID={target_project_id} 不一致"
+                        ),
+                        statistics={},
+                        warnings=warnings
+                    )
+
+            logger.info(
+                f"开始同步项目: target_project_id={target_project_id}, "
+                f"project_name={validation.project_name}, strict_source_match={strict_source_match}"
+            )
+
+            await ImportExportService._clear_project_related_data(
+                target_project_id,
+                db,
+                user_id=user_id
+            )
+
+            project_data = data["project"]
+            ImportExportService._apply_project_fields(target_project, project_data)
+            await db.flush()
+
+            char_mapping = await ImportExportService._import_characters(
+                target_project.id, data.get("characters", []), db
+            )
+            statistics["characters"] = len(char_mapping)
+
+            outline_mapping = await ImportExportService._import_outlines(
+                target_project.id, data.get("outlines", []), db
+            )
+            statistics["outlines"] = len(outline_mapping)
+
+            chapters_count = await ImportExportService._import_chapters(
+                target_project.id, data.get("chapters", []), outline_mapping, db
+            )
+            statistics["chapters"] = chapters_count
+
+            relationships_count = await ImportExportService._import_relationships(
+                target_project.id, data.get("relationships", []), char_mapping, db
+            )
+            statistics["relationships"] = relationships_count
+
+            org_mapping = await ImportExportService._import_organizations(
+                target_project.id, data.get("organizations", []), char_mapping, db
+            )
+            statistics["organizations"] = len(org_mapping)
+
+            org_members_count = await ImportExportService._import_organization_members(
+                data.get("organization_members", []), char_mapping, org_mapping, db
+            )
+            statistics["organization_members"] = org_members_count
+
+            styles_count = await ImportExportService._import_writing_styles(
+                target_project.id, data.get("writing_styles", []), db
+            )
+            statistics["writing_styles"] = styles_count
+
+            career_mapping = await ImportExportService._import_careers(
+                target_project.id, data.get("careers", []), db
+            )
+            statistics["careers"] = len(career_mapping)
+
+            char_careers_count = await ImportExportService._import_character_careers(
+                data.get("character_careers", []), char_mapping, career_mapping, db
+            )
+            statistics["character_careers"] = char_careers_count
+
+            chapter_title_to_id: Dict[str, str] = {}
+            chapter_number_to_id: Dict[int, str] = {}
+            chapter_result = await db.execute(
+                select(Chapter).where(Chapter.project_id == target_project.id)
+            )
+            imported_chapters = chapter_result.scalars().all()
+            for ch in imported_chapters:
+                if ch.title and ch.title not in chapter_title_to_id:
+                    chapter_title_to_id[ch.title] = ch.id
+                if ch.chapter_number is not None and ch.chapter_number not in chapter_number_to_id:
+                    chapter_number_to_id[ch.chapter_number] = ch.id
+
+            history_count = await ImportExportService._import_generation_history(
+                target_project.id, data.get("generation_history", []), chapter_title_to_id, db
+            )
+            statistics["generation_history"] = history_count
+
+            memories_count = await ImportExportService._import_story_memories(
+                target_project.id, data.get("story_memories", []), chapter_title_to_id, char_mapping, db
+            )
+            statistics["story_memories"] = memories_count
+
+            foreshadow_id_mapping, foreshadow_count = await ImportExportService._import_foreshadows(
+                target_project.id,
+                data.get("foreshadows", []),
+                chapter_number_to_id,
+                db
+            )
+            statistics["foreshadows"] = foreshadow_count
+
+            plot_analysis_count = await ImportExportService._import_plot_analysis(
+                target_project.id,
+                data.get("plot_analysis", []),
+                chapter_title_to_id,
+                db,
+                user_id,
+                foreshadow_id_mapping
+            )
+            statistics["plot_analysis"] = plot_analysis_count
+
+            default_style_imported = await ImportExportService._import_project_default_style(
+                target_project.id, data.get("project_default_style"), db
+            )
+            statistics["project_default_style"] = 1 if default_style_imported else 0
+
+            await db.commit()
+            await db.refresh(target_project)
+
+            return ImportResult(
+                success=True,
+                project_id=target_project.id,
+                message="项目同步成功",
+                statistics=statistics,
+                warnings=warnings
+            )
+
+        except Exception as e:
+            await db.rollback()
+            logger.error(f"同步项目失败: {str(e)}", exc_info=True)
+            return ImportResult(
+                success=False,
+                message=f"同步失败: {str(e)}",
                 statistics=statistics,
                 warnings=warnings
             )
