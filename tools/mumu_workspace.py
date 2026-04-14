@@ -18,7 +18,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from types import UnionType
-from typing import Any, Union, get_args, get_origin
+from typing import Any, Literal, Union, get_args, get_origin
 
 import tomllib
 
@@ -28,7 +28,8 @@ BACKEND_ROOT = REPO_ROOT / "backend"
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from pydantic import ValidationError  # type: ignore
+from pydantic import BaseModel, ConfigDict, ValidationError  # type: ignore
+from app.schemas.career import CareerStage  # type: ignore
 from app.schemas.import_export import (  # type: ignore
     ChapterExportData,
     CharacterCareerExportData,
@@ -50,6 +51,7 @@ from app.schemas.import_export import (  # type: ignore
 
 SUPPORTED_VERSIONS = {"1.0.0", "1.1.0", "1.2.0"}
 SINGLE_RECORD_SECTIONS = {"project", "project_default_style"}
+GROUPED_RECORD_SECTIONS = {"story_memories", "character_careers", "organization_members", "relationships"}
 WORKSPACE_RESERVED_PREFIXES = (".", "_")
 WORKSPACE_EXCLUDED_ROOT_NAMES = {"backups"}
 TOP_LEVEL_ORDER = [
@@ -279,6 +281,35 @@ SECTION_MODEL_MAP = {
 }
 
 
+class OutlineStructureCharacterModel(BaseModel):
+    name: str
+    type: Literal["character", "organization"]
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class OutlineStructureSceneModel(BaseModel):
+    location: str
+    characters: list[str]
+    purpose: str
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class OutlineStructureModel(BaseModel):
+    title: str
+    summary: str
+    content: str
+    characters: list[OutlineStructureCharacterModel]
+    scenes: list[str] | list[OutlineStructureSceneModel]
+    key_points: list[str]
+    key_events: list[str]
+    emotion: str
+    goal: str
+
+    model_config = ConfigDict(extra="forbid")
+
+
 @dataclass(frozen=True)
 class ValidationSummary:
     valid: bool
@@ -468,6 +499,131 @@ def normalize_export_dict(data: dict[str, Any]) -> tuple[dict[str, Any], list[st
         normalized[section] = normalized_records
 
     return normalized, errors
+
+
+def validate_json_string_field(section: str, field_name: str, value: Any) -> list[str]:
+    if not isinstance(value, str):
+        return [f"{section}.{field_name}: expected JSON string"]
+
+    stripped = value.strip()
+    if not stripped:
+        if section == "careers" and field_name == "stages":
+            return [f"{section}.{field_name}: JSON string must not be empty"]
+        return []
+
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError as exc:
+        return [f"{section}.{field_name}: invalid JSON string ({exc.msg})"]
+
+    try:
+        if section == "outlines" and field_name == "structure":
+            OutlineStructureModel.model_validate(parsed)
+        elif section == "careers" and field_name == "stages":
+            if not isinstance(parsed, list):
+                return [f"{section}.{field_name}: expected JSON array"]
+            for index, item in enumerate(parsed):
+                CareerStage.model_validate(item)
+        elif section == "careers" and field_name == "attribute_bonuses":
+            if not isinstance(parsed, dict):
+                return [f"{section}.{field_name}: expected JSON object"]
+            for key, item in parsed.items():
+                if not isinstance(key, str) or not isinstance(item, str):
+                    return [f"{section}.{field_name}: expected object<string, string>"]
+    except ValidationError as exc:
+        errors: list[str] = []
+        for issue in exc.errors():
+            location = ".".join(str(item) for item in issue.get("loc", ()))
+            prefix = f"{section}.{field_name}"
+            errors.append(f"{prefix}.{location}: {issue.get('msg', 'validation error')}" if location else f"{prefix}: {issue.get('msg', 'validation error')}")
+        return errors
+
+    return []
+
+
+def strict_validate_project_dict(project: Any) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(project, dict):
+        return ["project: expected object"]
+
+    extra_keys = sorted(set(project.keys()) - set(PROJECT_ALLOWED_FIELDS))
+    for key in extra_keys:
+        errors.append(f"project.{key}: extra field is not allowed")
+
+    missing_keys = [key for key in PROJECT_ALLOWED_FIELDS if key not in project]
+    for key in missing_keys:
+        errors.append(f"project.{key}: missing field")
+
+    return errors
+
+
+def strict_validate_model_record(section: str, record: Any, prefix: str) -> list[str]:
+    model = SECTION_MODEL_MAP[section]
+    errors: list[str] = []
+    if not isinstance(record, dict):
+        return [f"{prefix}: expected object"]
+
+    allowed_fields = set(model.model_fields.keys())
+    extra_keys = sorted(set(record.keys()) - allowed_fields)
+    for key in extra_keys:
+        errors.append(f"{prefix}.{key}: extra field is not allowed")
+
+    missing_keys = [key for key in model.model_fields.keys() if key not in record]
+    for key in missing_keys:
+        errors.append(f"{prefix}.{key}: missing field")
+
+    try:
+        model.model_validate(record)
+    except ValidationError as exc:
+        for issue in exc.errors():
+            location = ".".join(str(item) for item in issue.get("loc", ()))
+            errors.append(f"{prefix}.{location}: {issue.get('msg', 'validation error')}" if location else f"{prefix}: {issue.get('msg', 'validation error')}")
+
+    for field_name in JSON_STRING_FIELDS.get(section, set()):
+        if field_name not in record:
+            continue
+        for error in validate_json_string_field(section, field_name, record[field_name]):
+            suffix = error.split(".", 1)[-1] if error.startswith(f"{section}.") else error
+            if prefix != section:
+                errors.append(f"{prefix}.{suffix}")
+            else:
+                errors.append(error)
+
+    return errors
+
+
+def collect_strict_schema_errors(data: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+
+    allowed_top_level = set(TOP_LEVEL_FIELD_DEFAULTS.keys()) | set(TOP_LEVEL_ORDER)
+    extra_top_level = sorted(set(data.keys()) - allowed_top_level)
+    for key in extra_top_level:
+        errors.append(f"{key}: extra top-level field is not allowed")
+
+    missing_top_level = [key for key in [*TOP_LEVEL_FIELD_DEFAULTS.keys(), *TOP_LEVEL_ORDER] if key not in data]
+    for key in missing_top_level:
+        errors.append(f"{key}: missing top-level field")
+
+    if "project" in data:
+        errors.extend(strict_validate_project_dict(data.get("project")))
+
+    for section in TOP_LEVEL_ORDER:
+        if section == "project" or section not in data:
+            continue
+        section_value = data.get(section)
+        if section in SINGLE_RECORD_SECTIONS:
+            if section_value is None:
+                continue
+            errors.extend(strict_validate_model_record(section, section_value, section))
+            continue
+
+        if not isinstance(section_value, list):
+            errors.append(f"{section}: expected array")
+            continue
+        for index, record in enumerate(section_value):
+            errors.extend(strict_validate_model_record(section, record, f"{section}[{index}]"))
+
+    return errors
 
 
 def load_simple_env(env_path: Path) -> dict[str, str]:
@@ -820,6 +976,21 @@ def workspace_project_dir_name(project_title: str | None, fallback_name: str = "
     return name or fallback_name
 
 
+def resolve_workspace_export_target(output_dir: Path, project_title: str | None) -> Path:
+    nested_target = output_dir / workspace_project_dir_name(project_title)
+    if not output_dir.exists():
+        return nested_target
+
+    if is_workspace_directory(output_dir):
+        return output_dir
+
+    nested_dirs = nested_workspace_directories(output_dir)
+    if len(nested_dirs) == 1:
+        return nested_dirs[0]
+
+    return nested_target
+
+
 def managed_workspace_paths() -> list[Path]:
     return [*WORKSPACE_MANAGED_ROOT_FILES, *(SECTION_PATHS[section] for section in TOP_LEVEL_ORDER)]
 
@@ -1061,6 +1232,11 @@ def build_section_index_line(section: str, file_name: str, index: int, record: d
         details.append(f"organization={record.get('organization_name')}")
     if section == "generation_history" and record.get("model"):
         details.append(f"model={record.get('model')}")
+    if section == "story_memories":
+        if record.get("chapter_title"):
+            details.append(f"chapter={record.get('chapter_title')}")
+        if record.get("memory_type"):
+            details.append(f"type={record.get('memory_type')}")
     return f"- `{file_name}`: " + " | ".join(str(item) for item in details if item)
 
 
@@ -1070,6 +1246,229 @@ def write_section_index(section: str, target_dir: Path, records: list[dict[str, 
         lines.append(build_section_index_line(section, file_name, index, record))
     lines.append("")
     (target_dir / "_index.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+def story_memory_group_key(record: dict[str, Any]) -> tuple[int | None, str]:
+    timeline_raw = record.get("story_timeline")
+    timeline: int | None
+    try:
+        timeline = int(timeline_raw) if timeline_raw not in (None, "") else None
+    except (TypeError, ValueError):
+        timeline = None
+    chapter_title = str(record.get("chapter_title") or "").strip()
+    return timeline, chapter_title
+
+
+def story_memory_group_dir_name(record: dict[str, Any], fallback_index: int) -> str:
+    timeline, chapter_title = story_memory_group_key(record)
+    label_source = chapter_title or f"chapter-{fallback_index:03d}"
+    label = compact_label(label_source, max_length=36)
+    if timeline is not None:
+        return f"ch-{timeline:03d}-{label}"
+    return f"chx-{fallback_index:03d}-{label}"
+
+
+def story_memory_record_filename(record: dict[str, Any], index: int) -> str:
+    parts = [
+        record.get("title"),
+        record.get("memory_type"),
+    ]
+    label = compact_label("-".join(str(part) for part in parts if part), max_length=32)
+    return f"memory-{index:03d}-{label}.md"
+
+
+def group_story_memories(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[tuple[int | None, str], dict[str, Any]] = {}
+    fallback_index = 0
+    for record in records:
+        key = story_memory_group_key(record)
+        if key not in groups:
+            fallback_index += 1
+            timeline, chapter_title = key
+            groups[key] = {
+                "timeline": timeline,
+                "chapter_title": chapter_title,
+                "dir_name": story_memory_group_dir_name(record, fallback_index),
+                "records": [],
+            }
+        groups[key]["records"].append(record)
+    return list(groups.values())
+
+
+def write_story_memory_root_index(target_dir: Path, groups: list[dict[str, Any]]) -> None:
+    lines = ["# story_memories", ""]
+    for group in groups:
+        details: list[str] = []
+        if group.get("chapter_title"):
+            details.append(f"chapter={group['chapter_title']}")
+        if group.get("timeline") is not None:
+            details.append(f"story_timeline={group['timeline']}")
+        details.append(f"memories={len(group['records'])}")
+        lines.append(f"- `{group['dir_name']}/`: " + " | ".join(details))
+    lines.append("")
+    (target_dir / "_index.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+def write_story_memory_section(target_dir: Path, records: list[dict[str, Any]]) -> None:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    groups = group_story_memories(records)
+    for group in groups:
+        chapter_dir = target_dir / group["dir_name"]
+        chapter_dir.mkdir(parents=True, exist_ok=True)
+        file_names: list[str] = []
+        for index, record in enumerate(group["records"], start=1):
+            file_name = story_memory_record_filename(record, index)
+            file_names.append(file_name)
+            (chapter_dir / file_name).write_text(
+                build_record_markdown("story_memories", record, index),
+                encoding="utf-8",
+            )
+        write_section_index("story_memories", chapter_dir, group["records"], file_names)
+    write_story_memory_root_index(target_dir, groups)
+
+
+def story_memory_record_files(path: Path) -> list[Path]:
+    files = sorted(
+        file_path
+        for file_path in path.glob("*.md")
+        if not file_path.name.startswith("_")
+    )
+    nested_dirs = sorted(
+        child
+        for child in path.iterdir()
+        if child.is_dir() and not child.name.startswith((".", "_"))
+    )
+    for nested_dir in nested_dirs:
+        files.extend(
+            sorted(
+                file_path
+                for file_path in nested_dir.glob("*.md")
+                if not file_path.name.startswith("_")
+            )
+        )
+    return files
+
+
+def grouped_section_key(section: str, record: dict[str, Any]) -> tuple[str, str]:
+    if section == "character_careers":
+        return str(record.get("career_name") or "").strip(), str(record.get("career_type") or "").strip()
+    if section == "organization_members":
+        return str(record.get("organization_name") or "").strip(), ""
+    if section == "relationships":
+        return str(record.get("source_name") or "").strip(), ""
+    return "", ""
+
+
+def grouped_section_dir_name(section: str, record: dict[str, Any], fallback_index: int) -> str:
+    primary, secondary = grouped_section_key(section, record)
+    if section == "character_careers":
+        label_source = primary or f"career-{fallback_index:03d}"
+        label = compact_label(label_source, max_length=36)
+        type_label = compact_label(secondary or "unknown", max_length=16)
+        return f"career-{fallback_index:03d}-{type_label}-{label}"
+    if section == "organization_members":
+        label_source = primary or f"organization-{fallback_index:03d}"
+        label = compact_label(label_source, max_length=36)
+        return f"org-{fallback_index:03d}-{label}"
+    if section == "relationships":
+        label_source = primary or f"source-{fallback_index:03d}"
+        label = compact_label(label_source, max_length=36)
+        return f"char-{fallback_index:03d}-{label}"
+    return f"group-{fallback_index:03d}"
+
+
+def grouped_record_filename(section: str, record: dict[str, Any], index: int) -> str:
+    if section == "character_careers":
+        parts = [record.get("career_name"), record.get("character_name"), record.get("career_type")]
+        label = compact_label("-".join(str(part) for part in parts if part), max_length=32)
+        return f"charcareer-{index:03d}-{label}.md"
+    if section == "organization_members":
+        parts = [record.get("organization_name"), record.get("character_name"), record.get("position")]
+        label = compact_label("-".join(str(part) for part in parts if part), max_length=32)
+        return f"member-{index:03d}-{label}.md"
+    if section == "relationships":
+        parts = [record.get("source_name"), record.get("target_name"), record.get("relationship_name")]
+        label = compact_label("-".join(str(part) for part in parts if part), max_length=32)
+        return f"rel-{index:03d}-{label}.md"
+    return record_filename(section, record, index)
+
+
+def group_section_records(section: str, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    fallback_index = 0
+    for record in records:
+        key = grouped_section_key(section, record)
+        if key not in groups:
+            fallback_index += 1
+            groups[key] = {
+                "primary": key[0],
+                "secondary": key[1],
+                "dir_name": grouped_section_dir_name(section, record, fallback_index),
+                "records": [],
+            }
+        groups[key]["records"].append(record)
+    return list(groups.values())
+
+
+def write_grouped_section_root_index(section: str, target_dir: Path, groups: list[dict[str, Any]]) -> None:
+    lines = [f"# {section}", ""]
+    for group in groups:
+        details: list[str] = []
+        if section == "character_careers":
+            if group.get("primary"):
+                details.append(f"career={group['primary']}")
+            if group.get("secondary"):
+                details.append(f"type={group['secondary']}")
+        elif section == "organization_members":
+            if group.get("primary"):
+                details.append(f"organization={group['primary']}")
+        elif section == "relationships":
+            if group.get("primary"):
+                details.append(f"source={group['primary']}")
+        details.append(f"records={len(group['records'])}")
+        lines.append(f"- `{group['dir_name']}/`: " + " | ".join(details))
+    lines.append("")
+    (target_dir / "_index.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+def write_grouped_section(section: str, target_dir: Path, records: list[dict[str, Any]]) -> None:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    groups = group_section_records(section, records)
+    for group in groups:
+        group_dir = target_dir / group["dir_name"]
+        group_dir.mkdir(parents=True, exist_ok=True)
+        file_names: list[str] = []
+        for index, record in enumerate(group["records"], start=1):
+            file_name = grouped_record_filename(section, record, index)
+            file_names.append(file_name)
+            (group_dir / file_name).write_text(
+                build_record_markdown(section, record, index),
+                encoding="utf-8",
+            )
+        write_section_index(section, group_dir, group["records"], file_names)
+    write_grouped_section_root_index(section, target_dir, groups)
+
+
+def grouped_section_record_files(path: Path) -> list[Path]:
+    files = sorted(
+        file_path
+        for file_path in path.glob("*.md")
+        if not file_path.name.startswith("_")
+    )
+    nested_dirs = sorted(
+        child
+        for child in path.iterdir()
+        if child.is_dir() and not child.name.startswith((".", "_"))
+    )
+    for nested_dir in nested_dirs:
+        files.extend(
+            sorted(
+                file_path
+                for file_path in nested_dir.glob("*.md")
+                if not file_path.name.startswith("_")
+            )
+        )
+    return files
 
 
 def build_generic_readme_text() -> str:
@@ -1092,18 +1491,19 @@ def build_generic_readme_text() -> str:
         - `chapters/`：章节
         - `characters/`：角色或组织角色卡
         - `outlines/`：大纲
-        - `relationships/`：角色关系
+        - `relationships/`：角色关系（按起始角色分目录）
         - `organizations/`：组织详情
-        - `organization-members/`：组织成员
+        - `organization-members/`：组织成员（按组织分目录）
         - `careers/`：职业体系
-        - `character-careers/`：角色职业关联
+        - `character-careers/`：角色职业关联（按职业分目录）
         - `foreshadows/`：伏笔
         - `generation-history/`：生成历史
-        - `story-memories/`：故事记忆
+        - `story-memories/`：故事记忆（按章节分目录）
         - `plot-analysis/`：剧情分析
         - `writing-styles/`：写作风格
 
         每个目录下都会生成一个 `_index.md`，用于把短文件名映射到真实标题和关键字段。
+        `story-memories/`、`character-careers/`、`organization-members/`、`relationships/` 的根 `_index.md` 只列第一层分组目录，分组目录内再列具体记录文件。
 
         ## 文件命名
 
@@ -1294,9 +1694,47 @@ def build_generic_readme_text() -> str:
     )
 
 
+def build_workspace_claude_text(container_dir: Path, data_dir: Path, data: dict[str, Any]) -> str:
+    project_title = str(data.get("project", {}).get("title") or data_dir.name or "项目")
+    data_dir_name = data_dir.name
+    container_name = container_dir.name
+    source_project_id = str(data.get("source_project_id") or "未记录")
+    template_path = REPO_ROOT / "tools" / "CLAUDE.md"
+    if template_path.exists():
+        template = template_path.read_text(encoding="utf-8")
+    else:
+        template = "# CLAUDE.md\n请阅读同目录下的 `tool_README.md`。\n"
+    return (
+        template
+        .replace("{{CONTAINER_NAME}}", container_name)
+        .replace("{{DATA_DIR_NAME}}", data_dir_name)
+        .replace("{{PROJECT_TITLE}}", project_title)
+        .replace("{{SOURCE_PROJECT_ID}}", source_project_id)
+    )
+
+
+def build_workspace_tool_readme_text() -> str:
+    source_path = REPO_ROOT / "tools" / "README.md"
+    if source_path.exists():
+        return source_path.read_text(encoding="utf-8").rstrip() + "\n"
+    return "# tool_README.md\n工具说明缺失。\n"
+
+
 def write_workspace_readme(output_dir: Path, data: dict[str, Any]) -> None:
     _ = data
     (output_dir / "README.md").write_text(build_generic_readme_text() + "\n", encoding="utf-8")
+
+
+def write_workspace_claude_file(container_dir: Path, data_dir: Path, data: dict[str, Any]) -> None:
+    container_dir.mkdir(parents=True, exist_ok=True)
+    (container_dir / "CLAUDE.md").write_text(
+        build_workspace_claude_text(container_dir, data_dir, data) + "\n",
+        encoding="utf-8",
+    )
+    (container_dir / "tool_README.md").write_text(
+        build_workspace_tool_readme_text(),
+        encoding="utf-8",
+    )
 
 
 def write_workspace_meta(output_dir: Path, source_json: Path, data: dict[str, Any]) -> None:
@@ -1350,6 +1788,14 @@ def write_workspace_from_data(
                 target.write_text(markdown, encoding="utf-8")
             continue
 
+        if section == "story_memories":
+            write_story_memory_section(target, section_value)
+            continue
+
+        if section in {"character_careers", "organization_members", "relationships"}:
+            write_grouped_section(section, target, section_value)
+            continue
+
         target.mkdir(parents=True, exist_ok=True)
         file_names: list[str] = []
         for index, record in enumerate(section_value, start=1):
@@ -1366,8 +1812,10 @@ def export_json_to_workspace(input_json: Path, output_dir: Path, force: bool) ->
     data = json.loads(input_json.read_text(encoding="utf-8"))
     normalized_data, _ = normalize_export_dict(data)
     project_title = normalized_data.get("project", {}).get("title", "")
-    data_dir = output_dir / workspace_project_dir_name(project_title)
-    return write_workspace_from_data(normalized_data, data_dir, force=force, source_json=input_json)
+    data_dir = resolve_workspace_export_target(output_dir, project_title)
+    written_dir = write_workspace_from_data(normalized_data, data_dir, force=force, source_json=input_json)
+    write_workspace_claude_file(output_dir, written_dir, normalized_data)
+    return written_dir
 
 
 def read_workspace_meta(workspace_dir: Path) -> dict[str, Any]:
@@ -1388,6 +1836,12 @@ def parse_record_markdown(file_path: Path) -> dict[str, Any]:
         record[key] = value
 
     body_data = parse_body_fields(body)
+    declared_body_fields = set(frontmatter.get("body_fields", []))
+    missing_body_fields = sorted(field_name for field_name in declared_body_fields if field_name not in body_data)
+    if missing_body_fields:
+        raise ValueError(
+            f"markdown body fields are missing or malformed in {file_path}: {', '.join(missing_body_fields)}"
+        )
     json_string_fields = set(frontmatter.get("json_string_fields", []))
     for field_name, value in body_data.items():
         if field_name in json_string_fields:
@@ -1397,7 +1851,7 @@ def parse_record_markdown(file_path: Path) -> dict[str, Any]:
     return record
 
 
-def workspace_to_export_dict(workspace_dir: Path) -> dict[str, Any]:
+def workspace_to_export_dict(workspace_dir: Path, normalize: bool = True) -> dict[str, Any]:
     data_dir = resolve_workspace_data_dir(workspace_dir)
     meta = read_workspace_meta(data_dir)
     data: dict[str, Any] = {
@@ -1421,13 +1875,20 @@ def workspace_to_export_dict(workspace_dir: Path) -> dict[str, Any]:
         if not path.exists():
             data[section] = []
             continue
-        files = sorted(
-            file_path
-            for file_path in path.glob("*.md")
-            if not file_path.name.startswith("_")
-        )
+        if section == "story_memories":
+            files = story_memory_record_files(path)
+        elif section in {"character_careers", "organization_members", "relationships"}:
+            files = grouped_section_record_files(path)
+        else:
+            files = sorted(
+                file_path
+                for file_path in path.glob("*.md")
+                if not file_path.name.startswith("_")
+            )
         data[section] = [parse_record_markdown(file_path) for file_path in files]
 
+    if not normalize:
+        return data
     normalized, _ = normalize_export_dict(data)
     return normalized
 
@@ -1443,6 +1904,7 @@ def write_export_json(output_json: Path, data: dict[str, Any]) -> None:
 def validate_export_dict(data: dict[str, Any]) -> ValidationSummary:
     errors: list[str] = []
     warnings: list[str] = []
+    errors.extend(collect_strict_schema_errors(data))
     normalized, normalization_errors = normalize_export_dict(data)
     errors.extend(normalization_errors)
 
@@ -1590,11 +2052,12 @@ def main() -> int:
     if args.command == "md-to-json":
         workspace_dir = args.workspace_dir.resolve()
         output_json = args.output_json.resolve()
-        data = workspace_to_export_dict(workspace_dir)
-        summary = validate_export_dict(data)
+        raw_data = workspace_to_export_dict(workspace_dir, normalize=False)
+        summary = validate_export_dict(raw_data)
         if not summary.valid:
             print_validation(summary, str(workspace_dir))
             return 1
+        data = workspace_to_export_dict(workspace_dir, normalize=True)
         write_export_json(output_json, data)
         print_validation(summary, str(workspace_dir))
         print(f"output_json: {output_json}")
@@ -1603,7 +2066,7 @@ def main() -> int:
     if args.command == "validate":
         path = args.path.resolve()
         if path.is_dir():
-            summary = validate_export_dict(workspace_to_export_dict(path))
+            summary = validate_export_dict(workspace_to_export_dict(path, normalize=False))
         else:
             summary = validate_export_dict(json.loads(path.read_text(encoding="utf-8")))
         print_validation(summary, str(path))

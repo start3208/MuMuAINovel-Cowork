@@ -20,6 +20,8 @@
 `Workspace Studio` 新创建的工作区默认采用双层目录：
 
 - `workspace/ws-项目名称-项目id/`：工作区容器目录
+- `workspace/ws-项目名称-项目id/CLAUDE.md`：给 Claude Code / Codex 的短提示词
+- `workspace/ws-项目名称-项目id/tool_README.md`：工具说明镜像，直接来自 `tools/README.md`
 - `workspace/ws-项目名称-项目id/项目名称/`：真实 Markdown 数据目录
 
 旧版单层工作区目录仍然兼容。
@@ -29,18 +31,19 @@
 - `chapters/`：章节
 - `characters/`：角色或组织角色卡
 - `outlines/`：大纲
-- `relationships/`：角色关系
+- `relationships/`：角色关系（按起始角色分目录）
 - `organizations/`：组织详情
-- `organization-members/`：组织成员
+- `organization-members/`：组织成员（按组织分目录）
 - `careers/`：职业体系
-- `character-careers/`：角色职业关联
+- `character-careers/`：角色职业关联（按职业分目录）
 - `foreshadows/`：伏笔
 - `generation-history/`：生成历史
-- `story-memories/`：故事记忆
+- `story-memories/`：故事记忆（按章节分目录）
 - `plot-analysis/`：剧情分析
 - `writing-styles/`：写作风格
 
 每个目录下都会生成一个 `_index.md`，用于把短文件名映射到真实标题和关键字段。
+`story-memories/`、`character-careers/`、`organization-members/`、`relationships/` 的根 `_index.md` 只列第一层分组目录，分组目录内再列具体记录文件。
 
 ## 文件命名
 

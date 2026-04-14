@@ -1,5 +1,6 @@
 import { Route, Routes, Navigate } from 'react-router-dom';
 import WorkspaceHomePage from './pages/WorkspaceHomePage';
+import WorkspaceBackupsPage from './pages/WorkspaceBackupsPage';
 import WorkspaceProjectShell from './pages/WorkspaceProjectShell';
 import WorkspaceOverviewPage from './pages/WorkspaceOverviewPage';
 import WorkspaceWorldSettingPage from './pages/WorkspaceWorldSettingPage';
@@ -11,6 +12,7 @@ import WorkspaceOutlinePage from './pages/WorkspaceOutlinePage';
 import WorkspaceChaptersPage from './pages/WorkspaceChaptersPage';
 import WorkspaceChapterAnalysisPage from './pages/WorkspaceChapterAnalysisPage';
 import WorkspaceForeshadowsPage from './pages/WorkspaceForeshadowsPage';
+import WorkspaceMemoriesPage from './pages/WorkspaceMemoriesPage';
 import WorkspaceWritingStylesPage from './pages/WorkspaceWritingStylesPage';
 import WorkspaceRelationshipGraphPage from './pages/WorkspaceRelationshipGraphPage';
 
@@ -18,6 +20,7 @@ export default function App() {
   return (
     <Routes>
       <Route path="/" element={<WorkspaceHomePage />} />
+      <Route path="/backups" element={<WorkspaceBackupsPage />} />
       <Route path="/workspace/:workspaceName" element={<WorkspaceProjectShell />}>
         <Route index element={<Navigate to="overview" replace />} />
         <Route path="overview" element={<WorkspaceOverviewPage />} />
@@ -28,6 +31,7 @@ export default function App() {
         <Route path="relationships" element={<WorkspaceRelationshipsPage />} />
         <Route path="outline" element={<WorkspaceOutlinePage />} />
         <Route path="chapters" element={<WorkspaceChaptersPage />} />
+        <Route path="memories" element={<WorkspaceMemoriesPage />} />
         <Route path="chapter-analysis" element={<WorkspaceChapterAnalysisPage />} />
         <Route path="foreshadows" element={<WorkspaceForeshadowsPage />} />
         <Route path="writing-styles" element={<WorkspaceWritingStylesPage />} />

@@ -6,7 +6,7 @@ import { useWorkspaceContext } from '../workspace-context';
 const { Paragraph } = Typography;
 
 export default function WorkspaceOverviewPage() {
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const { workspaceName, summary, data, reload } = useWorkspaceContext();
 
   const handleValidate = async () => {
@@ -25,15 +25,27 @@ export default function WorkspaceOverviewPage() {
 
   const handleSync = async () => {
     try {
-      const result = await studioApi.syncWorkspace(workspaceName, summary.source_project_id || undefined);
-      if (result.result.success) {
-        message.success(`同步成功，备份文件：${result.backup_path}`);
-      } else {
-        message.error(result.result.message);
-      }
-      await reload();
+      const diff = await studioApi.getWorkspaceMemoryDiff(workspaceName);
+      modal.confirm({
+        title: '确认同步回原书',
+        content: `将同步当前工作区到 MuMu。记忆差异：冲突 ${diff.summary.changed}，仅本地 ${diff.summary.local_only}，仅远端 ${diff.summary.remote_only}。`,
+        centered: true,
+        onOk: async () => {
+          try {
+            const result = await studioApi.syncWorkspace(workspaceName, summary.source_project_id || undefined);
+            if (result.result.success) {
+              message.success(`同步成功，备份文件：${result.backup_path}`);
+            } else {
+              message.error(result.result.message);
+            }
+            await reload();
+          } catch (error) {
+            message.error(error instanceof Error ? error.message : '同步失败');
+          }
+        },
+      });
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '同步失败');
+      message.error(error instanceof Error ? error.message : '同步前检查失败');
     }
   };
 

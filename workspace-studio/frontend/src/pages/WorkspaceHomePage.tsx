@@ -14,6 +14,7 @@ import {
   Typography,
 } from 'antd';
 import {
+  InboxOutlined,
   CloudDownloadOutlined,
   FileSearchOutlined,
   FolderOpenOutlined,
@@ -28,8 +29,35 @@ import type { MumuProject, WorkspaceSummary } from '../types';
 const { Header, Content } = Layout;
 const { Title, Paragraph, Text } = Typography;
 
+function sanitizeWorkspaceLabel(value: string): string {
+  const cleaned = value
+    .replace(/[<>:"/\\|?*]/g, '-')
+    .replace(/\s+/g, '-')
+    .replace(/-{2,}/g, '-')
+    .trim()
+    .replace(/^[.\-\s_]+|[.\-\s_]+$/g, '');
+  return cleaned || 'untitled';
+}
+
+function compactWorkspaceLabel(value: string, maxLength = 24): string {
+  const label = sanitizeWorkspaceLabel(value);
+  if (label.length <= maxLength) {
+    return label;
+  }
+  return label.slice(0, maxLength).replace(/[-_.\s]+$/g, '') || 'untitled';
+}
+
+function deriveWorkspaceName(project: MumuProject, draft?: string): string {
+  const trimmedDraft = (draft || '').trim();
+  if (trimmedDraft) {
+    return compactWorkspaceLabel(trimmedDraft, 60);
+  }
+  const titleLabel = compactWorkspaceLabel(project.title || 'project', 24);
+  return compactWorkspaceLabel(`ws-${titleLabel}-${project.id.slice(0, 8)}`, 60);
+}
+
 export default function WorkspaceHomePage() {
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const navigate = useNavigate();
   const [mumuProjects, setMumuProjects] = useState<MumuProject[]>([]);
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
@@ -57,17 +85,28 @@ export default function WorkspaceHomePage() {
   }, []);
 
   const handlePullWorkspace = async (project: MumuProject) => {
-    try {
-      const summary = await studioApi.exportWorkspace(
-        project.id,
-        workspaceNameDrafts[project.id] || undefined,
-      );
-      message.success(`已生成工作区：${summary.name}`);
-      await loadAll();
-      navigate(`/workspace/${encodeURIComponent(summary.name)}/overview`);
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : '拉取失败');
-    }
+    const targetName = deriveWorkspaceName(project, workspaceNameDrafts[project.id]);
+    const existing = workspaces.find((item) => item.name === targetName);
+    modal.confirm({
+      title: '确认拉取到工作区',
+      content: existing
+        ? `工作区 ${targetName} 已存在，继续会覆盖本地工作区内容。`
+        : `将从 MuMu 拉取《${project.title}》到工作区 ${targetName}。`,
+      centered: true,
+      onOk: async () => {
+        try {
+          const summary = await studioApi.exportWorkspace(
+            project.id,
+            (workspaceNameDrafts[project.id] || '').trim() || undefined,
+          );
+          message.success(`已生成工作区：${summary.name}`);
+          await loadAll();
+          navigate(`/workspace/${encodeURIComponent(summary.name)}/overview`);
+        } catch (error) {
+          message.error(error instanceof Error ? error.message : '拉取失败');
+        }
+      },
+    });
   };
 
   const handleValidateWorkspace = async (workspace: WorkspaceSummary) => {
@@ -86,25 +125,44 @@ export default function WorkspaceHomePage() {
 
   const handleSyncWorkspace = async (workspace: WorkspaceSummary) => {
     try {
-      const result = await studioApi.syncWorkspace(workspace.name, workspace.source_project_id || undefined);
-      if (result.result.success) {
-        message.success(`同步成功，已备份到：${result.backup_path}`);
-      } else {
-        message.error(result.result.message);
-      }
+      const diff = await studioApi.getWorkspaceMemoryDiff(workspace.name);
+      modal.confirm({
+        title: '确认同步回 MuMu',
+        content: `将同步工作区 ${workspace.name} 到原书。当前记忆差异：冲突 ${diff.summary.changed}，仅本地 ${diff.summary.local_only}，仅远端 ${diff.summary.remote_only}。`,
+        centered: true,
+        onOk: async () => {
+          try {
+            const result = await studioApi.syncWorkspace(workspace.name, workspace.source_project_id || undefined);
+            if (result.result.success) {
+              message.success(`同步成功，已备份到：${result.backup_path}`);
+            } else {
+              message.error(result.result.message);
+            }
+          } catch (error) {
+            message.error(error instanceof Error ? error.message : '同步失败');
+          }
+        },
+      });
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '同步失败');
+      message.error(error instanceof Error ? error.message : '同步前检查失败');
     }
   };
 
   const handleDeleteWorkspace = async (workspace: WorkspaceSummary) => {
-    try {
-      await studioApi.deleteWorkspace(workspace.name);
-      message.success(`已删除工作区：${workspace.name}`);
-      await loadAll();
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : '删除失败');
-    }
+    modal.confirm({
+      title: '确认删除工作区',
+      content: `将删除本地工作区 ${workspace.name}。该操作不会删除 MuMu 远端项目。`,
+      centered: true,
+      onOk: async () => {
+        try {
+          await studioApi.deleteWorkspace(workspace.name);
+          message.success(`已删除工作区：${workspace.name}`);
+          await loadAll();
+        } catch (error) {
+          message.error(error instanceof Error ? error.message : '删除失败');
+        }
+      },
+    });
   };
 
   return (
@@ -120,9 +178,14 @@ export default function WorkspaceHomePage() {
           <Title level={2} style={{ margin: 0 }}>
             Workspace Studio
           </Title>
-          <Paragraph type="secondary" style={{ margin: 0 }}>
-            直接管理本地工作区，拉取 MuMu 书籍，编辑本地 Markdown，再严格同步回指定项目。
-          </Paragraph>
+          <Space wrap>
+            <Paragraph type="secondary" style={{ margin: 0 }}>
+              直接管理本地工作区，拉取 MuMu 书籍，编辑本地 Markdown，再严格同步回指定项目。
+            </Paragraph>
+            <Button icon={<InboxOutlined />} onClick={() => navigate('/backups')}>
+              备份管理
+            </Button>
+          </Space>
         </Space>
       </Header>
 

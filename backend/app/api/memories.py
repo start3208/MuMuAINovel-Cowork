@@ -1,13 +1,14 @@
 """记忆管理API - 提供记忆的查询、分析等接口"""
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, desc, delete
+from sqlalchemy import select, and_, desc, delete, func
 from typing import List, Optional
 from app.database import get_db
 from app.models.memory import StoryMemory, PlotAnalysis
 from app.models.chapter import Chapter
 from app.models.project import Project
 from app.services.memory_service import memory_service
+from app.services.import_export_service import ImportExportService
 from app.services.plot_analyzer import get_plot_analyzer
 from app.services.foreshadow_service import foreshadow_service
 from app.services.ai_service import create_user_ai_service
@@ -292,7 +293,8 @@ async def get_project_memories(
     request: Request,
     memory_type: Optional[str] = None,
     chapter_id: Optional[str] = None,
-    limit: int = 50,
+    page: int = 1,
+    page_size: int = 50,
     db: AsyncSession = Depends(get_db)
 ):
     """获取项目的记忆列表"""
@@ -309,16 +311,23 @@ async def get_project_memories(
             query = query.where(StoryMemory.memory_type == memory_type)
         if chapter_id:
             query = query.where(StoryMemory.chapter_id == chapter_id)
-        
-        query = query.order_by(desc(StoryMemory.importance_score), desc(StoryMemory.created_at)).limit(limit)
-        
+
+        page = max(1, page)
+        page_size = max(1, min(page_size, 200))
+        total_query = select(func.count()).select_from(query.subquery())
+        total = (await db.execute(total_query)).scalar_one()
+        offset = (page - 1) * page_size
+
+        query = query.order_by(desc(StoryMemory.importance_score), desc(StoryMemory.created_at)).offset(offset).limit(page_size)
         result = await db.execute(query)
         memories = result.scalars().all()
         
         return {
             "success": True,
             "memories": [mem.to_dict() for mem in memories],
-            "total": len(memories)
+            "total": total,
+            "page": page,
+            "page_size": page_size
         }
         
     except Exception as e:
@@ -400,6 +409,35 @@ async def search_memories(
         
     except Exception as e:
         logger.error(f"❌ 搜索记忆失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/projects/{project_id}/reindex")
+async def rebuild_project_memory_index(
+    project_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db)
+):
+    """重建项目的向量记忆索引"""
+    try:
+        user_id = getattr(request.state, 'user_id', None)
+
+        await verify_project_access(project_id, user_id, db)
+
+        rebuilt_count = await ImportExportService.rebuild_project_memory_index(
+            project_id=project_id,
+            user_id=user_id,
+            db=db,
+        )
+
+        return {
+            "success": True,
+            "project_id": project_id,
+            "rebuilt_count": rebuilt_count,
+        }
+
+    except Exception as e:
+        logger.error(f"❌ 重建项目向量记忆失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

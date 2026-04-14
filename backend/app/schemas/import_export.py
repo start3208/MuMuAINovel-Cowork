@@ -152,6 +152,7 @@ class CharacterCareerExportData(BaseModel):
 
 class StoryMemoryExportData(BaseModel):
     """故事记忆导出数据"""
+    id: Optional[str] = None
     chapter_title: Optional[str] = None  # 通过章节标题关联
     memory_type: str
     title: Optional[str] = None

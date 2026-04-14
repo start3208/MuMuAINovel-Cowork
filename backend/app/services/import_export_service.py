@@ -1,9 +1,13 @@
 """导入导出服务"""
+import copy
 import json
+import uuid
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Any
+from types import UnionType
+from typing import Dict, List, Optional, Tuple, Any, Literal, Union, get_args, get_origin
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_, delete
+from pydantic import BaseModel, ConfigDict, ValidationError
 from app.models.project import Project
 from app.models.chapter import Chapter
 from app.models.character import Character
@@ -36,10 +40,88 @@ from app.schemas.import_export import (
     ImportValidationResult,
     ImportResult
 )
+from app.schemas.career import CareerStage
 from app.services.memory_service import memory_service
 from app.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+TOP_LEVEL_ORDER = [
+    "project",
+    "chapters",
+    "characters",
+    "outlines",
+    "relationships",
+    "organizations",
+    "organization_members",
+    "writing_styles",
+    "generation_history",
+    "careers",
+    "character_careers",
+    "story_memories",
+    "plot_analysis",
+    "foreshadows",
+    "project_default_style",
+]
+TOP_LEVEL_FIELD_DEFAULTS = {
+    "version": "1.2.0",
+    "export_time": "",
+    "source_project_id": "",
+}
+PROJECT_FIELD_DEFAULTS = {
+    "title": "",
+    "description": "",
+    "theme": "",
+    "genre": "",
+    "target_words": 0,
+    "current_words": 0,
+    "status": "",
+    "world_time_period": "",
+    "world_location": "",
+    "world_atmosphere": "",
+    "world_rules": "",
+    "chapter_count": 0,
+    "narrative_perspective": "",
+    "character_count": 0,
+    "outline_mode": "",
+    "user_id": "",
+    "created_at": "",
+}
+SINGLE_RECORD_SECTIONS = {"project", "project_default_style"}
+JSON_STRING_FIELDS = {
+    "outlines": {"structure"},
+    "careers": {"stages", "attribute_bonuses"},
+}
+
+
+class OutlineStructureCharacterModel(BaseModel):
+    name: str
+    type: Literal["character", "organization"]
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class OutlineStructureSceneModel(BaseModel):
+    location: str
+    characters: list[str]
+    purpose: str
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class OutlineStructureModel(BaseModel):
+    title: str
+    summary: str
+    content: str
+    characters: list[OutlineStructureCharacterModel]
+    scenes: list[str] | list[OutlineStructureSceneModel]
+    key_points: list[str]
+    key_events: list[str]
+    emotion: str
+    goal: str
+
+    model_config = ConfigDict(extra="forbid")
 
 
 class ImportExportService:
@@ -47,6 +129,405 @@ class ImportExportService:
     
     SUPPORTED_VERSIONS = ["1.0.0", "1.1.0", "1.2.0"]  # 支持的版本列表
     CURRENT_VERSION = "1.2.0"  # 当前导出版本
+    PROJECT_ALLOWED_FIELDS = list(PROJECT_FIELD_DEFAULTS.keys())
+    SECTION_MODEL_MAP = {
+        "chapters": ChapterExportData,
+        "characters": CharacterExportData,
+        "outlines": OutlineExportData,
+        "relationships": RelationshipExportData,
+        "organizations": OrganizationExportData,
+        "organization_members": OrganizationMemberExportData,
+        "writing_styles": WritingStyleExportData,
+        "generation_history": GenerationHistoryExportData,
+        "careers": CareerExportData,
+        "character_careers": CharacterCareerExportData,
+        "story_memories": StoryMemoryExportData,
+        "plot_analysis": PlotAnalysisExportData,
+        "foreshadows": ForeshadowExportData,
+        "project_default_style": ProjectDefaultStyleExportData,
+    }
+
+    @staticmethod
+    def _unwrap_optional(annotation: Any) -> Any:
+        origin = get_origin(annotation)
+        if origin is None:
+            return annotation
+        if origin not in (Union, UnionType):
+            return annotation
+        args = [arg for arg in get_args(annotation) if arg is not type(None)]
+        if len(args) == 1:
+            return args[0]
+        return annotation
+
+    @staticmethod
+    def _default_for_annotation(annotation: Any) -> Any:
+        annotation = ImportExportService._unwrap_optional(annotation)
+        origin = get_origin(annotation)
+
+        if origin in (list, tuple, set, frozenset):
+            return []
+        if origin is dict:
+            return {}
+        if annotation is str:
+            return ""
+        if annotation is int:
+            return 0
+        if annotation is float:
+            return 0.0
+        if annotation is bool:
+            return False
+        return ""
+
+    @staticmethod
+    def _default_for_model_field(field: Any) -> Any:
+        if field.default_factory is not None:
+            return field.default_factory()
+        if field.default is not None and str(field.default) != "PydanticUndefined":
+            return copy.deepcopy(field.default)
+        return ImportExportService._default_for_annotation(field.annotation)
+
+    @staticmethod
+    def _normalize_value_for_annotation(annotation: Any, value: Any) -> Any:
+        annotation = ImportExportService._unwrap_optional(annotation)
+        origin = get_origin(annotation)
+
+        if value is None:
+            return ImportExportService._default_for_annotation(annotation)
+
+        if origin in (list, tuple, set, frozenset):
+            if value == "":
+                return []
+            if isinstance(value, list):
+                return value
+            if isinstance(value, str):
+                stripped = value.strip()
+                if not stripped:
+                    return []
+                try:
+                    parsed = json.loads(stripped)
+                    return parsed if isinstance(parsed, list) else []
+                except json.JSONDecodeError:
+                    return [item.strip() for item in value.split(",") if item.strip()]
+            return []
+
+        if origin is dict:
+            if value == "":
+                return {}
+            if isinstance(value, dict):
+                return value
+            if isinstance(value, str):
+                stripped = value.strip()
+                if not stripped:
+                    return {}
+                try:
+                    parsed = json.loads(stripped)
+                    return parsed if isinstance(parsed, dict) else {}
+                except json.JSONDecodeError:
+                    return {}
+            return {}
+
+        if annotation is str:
+            return "" if value is None else str(value)
+        if annotation is int:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return 0
+        if annotation is float:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return 0.0
+        if annotation is bool:
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                return value.strip().lower() in {"1", "true", "yes", "on"}
+            return bool(value)
+
+        return value
+
+    @staticmethod
+    def _normalize_outline_structure_value(value: Any) -> tuple[str, list[str]]:
+        errors: list[str] = []
+        default_structure = {
+            "title": "",
+            "summary": "",
+            "content": "",
+            "characters": [],
+            "scenes": [],
+            "key_points": [],
+            "key_events": [],
+            "emotion": "",
+            "goal": "",
+        }
+
+        if value in (None, ""):
+            return json.dumps(default_structure, ensure_ascii=False), errors
+
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError as exc:
+                return json.dumps(default_structure, ensure_ascii=False), [f"outlines.structure: invalid JSON string ({exc.msg})"]
+        elif isinstance(value, dict):
+            parsed = value
+        else:
+            return json.dumps(default_structure, ensure_ascii=False), ["outlines.structure: expected JSON string or object"]
+
+        if not isinstance(parsed, dict):
+            return json.dumps(default_structure, ensure_ascii=False), ["outlines.structure: expected JSON object"]
+
+        extra_keys = sorted(set(parsed.keys()) - set(default_structure.keys()))
+        for key in extra_keys:
+            errors.append(f"outlines.structure.{key}: extra field is not allowed")
+
+        merged = {**default_structure}
+        for key in default_structure:
+            merged[key] = parsed.get(key, default_structure[key])
+
+        try:
+            if isinstance(merged.get("characters"), list):
+                normalized_characters = []
+                for item in merged["characters"]:
+                    if isinstance(item, dict):
+                        normalized_characters.append(
+                            {
+                                "name": str(item.get("name", "")),
+                                "type": "organization" if str(item.get("type", "")) == "organization" else "character",
+                            }
+                        )
+                merged["characters"] = normalized_characters
+            else:
+                merged["characters"] = []
+
+            if isinstance(merged.get("scenes"), list):
+                normalized_scenes = []
+                has_object_scene = any(isinstance(item, dict) for item in merged["scenes"])
+                for item in merged["scenes"]:
+                    if has_object_scene:
+                        if isinstance(item, dict):
+                            normalized_scenes.append(
+                                {
+                                    "location": str(item.get("location", "")),
+                                    "characters": [str(char) for char in item.get("characters", []) if str(char)],
+                                    "purpose": str(item.get("purpose", "")),
+                                }
+                            )
+                    else:
+                        normalized_scenes.append(str(item))
+                merged["scenes"] = normalized_scenes
+            else:
+                merged["scenes"] = []
+
+            for key in ("key_points", "key_events"):
+                if isinstance(merged.get(key), list):
+                    merged[key] = [str(item) for item in merged[key]]
+                else:
+                    merged[key] = []
+
+            for key in ("title", "summary", "content", "emotion", "goal"):
+                merged[key] = str(merged.get(key, ""))
+
+            OutlineStructureModel.model_validate(merged)
+        except ValidationError as exc:
+            for issue in exc.errors():
+                location = ".".join(str(item) for item in issue.get("loc", ()))
+                errors.append(f"outlines.structure.{location}: {issue.get('msg', 'validation error')}" if location else f"outlines.structure: {issue.get('msg', 'validation error')}")
+
+        return json.dumps(merged, ensure_ascii=False), errors
+
+    @staticmethod
+    def _normalize_json_string_field(section: str, field_name: str, value: Any) -> tuple[str, list[str]]:
+        if section == "outlines" and field_name == "structure":
+            return ImportExportService._normalize_outline_structure_value(value)
+
+        if section == "careers" and field_name == "stages":
+            errors: list[str] = []
+            if value in (None, ""):
+                return "[]", errors
+            if isinstance(value, str):
+                try:
+                    parsed = json.loads(value)
+                except json.JSONDecodeError as exc:
+                    return "[]", [f"careers.stages: invalid JSON string ({exc.msg})"]
+            else:
+                parsed = value
+            if not isinstance(parsed, list):
+                return "[]", ["careers.stages: expected JSON array"]
+            normalized_items = []
+            for item in parsed:
+                if not isinstance(item, dict):
+                    errors.append("careers.stages: expected array<object>")
+                    continue
+                normalized_stage = {
+                    "level": int(item.get("level", 0) or 0),
+                    "name": str(item.get("name", "")),
+                    "description": item.get("description"),
+                }
+                try:
+                    CareerStage.model_validate(normalized_stage)
+                except ValidationError as exc:
+                    for issue in exc.errors():
+                        location = ".".join(str(part) for part in issue.get("loc", ()))
+                        errors.append(f"careers.stages.{location}: {issue.get('msg', 'validation error')}" if location else f"careers.stages: {issue.get('msg', 'validation error')}")
+                normalized_items.append(normalized_stage)
+            return json.dumps(normalized_items, ensure_ascii=False), errors
+
+        if section == "careers" and field_name == "attribute_bonuses":
+            errors: list[str] = []
+            if value in (None, ""):
+                return "{}", errors
+            if isinstance(value, str):
+                try:
+                    parsed = json.loads(value)
+                except json.JSONDecodeError as exc:
+                    return "{}", [f"careers.attribute_bonuses: invalid JSON string ({exc.msg})"]
+            else:
+                parsed = value
+            if not isinstance(parsed, dict):
+                return "{}", ["careers.attribute_bonuses: expected JSON object"]
+            normalized_dict = {str(key): str(item) for key, item in parsed.items()}
+            return json.dumps(normalized_dict, ensure_ascii=False), errors
+
+        return str(value or ""), []
+
+    @staticmethod
+    def normalize_import_data(data: Dict[str, Any]) -> tuple[Dict[str, Any], list[str]]:
+        errors: list[str] = []
+        normalized: Dict[str, Any] = {}
+
+        allowed_top_level = set(TOP_LEVEL_FIELD_DEFAULTS.keys()) | set(TOP_LEVEL_ORDER)
+        extra_top_level = sorted(set(data.keys()) - allowed_top_level)
+        for key in extra_top_level:
+            errors.append(f"{key}: extra top-level field is not allowed")
+
+        for key, default_value in TOP_LEVEL_FIELD_DEFAULTS.items():
+            normalized[key] = copy.deepcopy(data.get(key, default_value))
+
+        project = data.get("project") or {}
+        extra_project = sorted(set(project.keys()) - set(ImportExportService.PROJECT_ALLOWED_FIELDS))
+        for key in extra_project:
+            errors.append(f"project.{key}: extra field is not allowed")
+        normalized["project"] = {
+            key: copy.deepcopy(project.get(key, PROJECT_FIELD_DEFAULTS[key]))
+            for key in ImportExportService.PROJECT_ALLOWED_FIELDS
+        }
+
+        for section in TOP_LEVEL_ORDER:
+            if section == "project":
+                continue
+            model = ImportExportService.SECTION_MODEL_MAP[section]
+            source_value = data.get(section)
+
+            if section in SINGLE_RECORD_SECTIONS:
+                if source_value is None and section != "project":
+                    normalized[section] = None
+                    continue
+                source_record = source_value or {}
+                if source_value is None:
+                    source_record = {}
+                if not isinstance(source_record, dict):
+                    source_record = {}
+                extra_keys = sorted(set(source_record.keys()) - set(model.model_fields.keys()))
+                for key in extra_keys:
+                    errors.append(f"{section}.{key}: extra field is not allowed")
+                normalized_record: Dict[str, Any] = {}
+                for field_name, field in model.model_fields.items():
+                    raw_value = copy.deepcopy(source_record.get(field_name)) if field_name in source_record else ImportExportService._default_for_model_field(field)
+                    if field_name in JSON_STRING_FIELDS.get(section, set()):
+                        normalized_value, field_errors = ImportExportService._normalize_json_string_field(section, field_name, raw_value)
+                        normalized_record[field_name] = normalized_value
+                        errors.extend(field_errors)
+                    else:
+                        normalized_record[field_name] = ImportExportService._normalize_value_for_annotation(field.annotation, raw_value)
+                normalized[section] = normalized_record
+                continue
+
+            if not isinstance(source_value, list):
+                source_value = []
+            normalized_records: list[Dict[str, Any]] = []
+            for index, record in enumerate(source_value):
+                record = record if isinstance(record, dict) else {}
+                extra_keys = sorted(set(record.keys()) - set(model.model_fields.keys()))
+                for key in extra_keys:
+                    errors.append(f"{section}[{index}].{key}: extra field is not allowed")
+                normalized_record: Dict[str, Any] = {}
+                for field_name, field in model.model_fields.items():
+                    raw_value = copy.deepcopy(record.get(field_name)) if field_name in record else ImportExportService._default_for_model_field(field)
+                    if field_name in JSON_STRING_FIELDS.get(section, set()):
+                        normalized_value, field_errors = ImportExportService._normalize_json_string_field(section, field_name, raw_value)
+                        normalized_record[field_name] = normalized_value
+                        errors.extend(field_errors)
+                    else:
+                        normalized_record[field_name] = ImportExportService._normalize_value_for_annotation(field.annotation, raw_value)
+                normalized_records.append(normalized_record)
+            normalized[section] = normalized_records
+
+        return normalized, errors
+
+    @staticmethod
+    def _normalize_memory_vector_metadata(
+        memory: StoryMemory,
+        related_character_names: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        return {
+            "chapter_id": memory.chapter_id,
+            "chapter_number": memory.story_timeline,
+            "importance_score": memory.importance_score or 0.5,
+            "tags": memory.tags or [],
+            "title": memory.title or "",
+            "is_foreshadow": memory.is_foreshadow or 0,
+            "related_characters": related_character_names or [],
+        }
+
+    @staticmethod
+    async def rebuild_project_memory_index(
+        project_id: str,
+        user_id: str,
+        db: AsyncSession,
+    ) -> int:
+        chapter_result = await db.execute(
+            select(StoryMemory)
+            .where(StoryMemory.project_id == project_id)
+            .order_by(StoryMemory.story_timeline, StoryMemory.chapter_position, StoryMemory.created_at)
+        )
+        memories = chapter_result.scalars().all()
+        if not memories:
+            return await memory_service.rebuild_project_memories(user_id, project_id, [])
+
+        char_result = await db.execute(
+            select(Character).where(Character.project_id == project_id)
+        )
+        characters = char_result.scalars().all()
+        char_mapping = {char.id: char.name for char in characters}
+
+        vector_records: List[Dict[str, Any]] = []
+        for memory in memories:
+            related_character_names: List[str] = []
+            if memory.related_characters:
+                related_character_names = [
+                    char_mapping.get(char_id, char_id)
+                    for char_id in memory.related_characters
+                ]
+
+            vector_records.append(
+                {
+                    "id": memory.vector_id or memory.id,
+                    "content": memory.content,
+                    "type": memory.memory_type,
+                    "metadata": ImportExportService._normalize_memory_vector_metadata(
+                        memory,
+                        related_character_names=related_character_names,
+                    ),
+                }
+            )
+
+        return await memory_service.rebuild_project_memories(
+            user_id=user_id,
+            project_id=project_id,
+            memories=vector_records,
+        )
 
     @staticmethod
     def _apply_project_fields(target_project: Project, project_data: Dict[str, Any]) -> None:
@@ -291,6 +772,13 @@ class ImportExportService:
             foreshadows=foreshadows,
             project_default_style=project_default_style
         )
+
+        normalized_export_data, normalization_errors = ImportExportService.normalize_import_data(
+            export_data.model_dump(by_alias=True)
+        )
+        if normalization_errors:
+            logger.warning(f"导出数据规范化提示: {normalization_errors}")
+        export_data = ProjectExportData.model_validate(normalized_export_data)
         
         logger.info(f"项目导出完成: {project_id}")
         return export_data
@@ -643,6 +1131,7 @@ class ImportExportService:
                 ]
             
             exported.append(StoryMemoryExportData(
+                id=mem.id,
                 chapter_title=chapter_mapping.get(mem.chapter_id) if mem.chapter_id else None,
                 memory_type=mem.memory_type,
                 title=mem.title,
@@ -794,38 +1283,44 @@ class ImportExportService:
         errors = []
         warnings = []
         statistics = {}
+        normalized, normalization_errors = ImportExportService.normalize_import_data(data)
+        errors.extend(normalization_errors)
         
         # 检查版本
-        version = data.get("version", "")
+        version = normalized.get("version", "")
         if not version:
             errors.append("缺少版本信息")
         elif version not in ImportExportService.SUPPORTED_VERSIONS:
             warnings.append(f"版本不匹配: 导入文件版本为 {version}, 当前支持版本为 {', '.join(ImportExportService.SUPPORTED_VERSIONS)}")
-        
-        # 检查必需字段
-        if "project" not in data:
-            errors.append("缺少项目信息")
-        else:
-            project = data["project"]
-            if not project.get("title"):
-                errors.append("项目标题不能为空")
+
+        try:
+            ProjectExportData.model_validate(normalized)
+        except ValidationError as exc:
+            for issue in exc.errors():
+                location = ".".join(str(item) for item in issue.get("loc", ()))
+                message = issue.get("msg", "validation error")
+                errors.append(f"{location}: {message}" if location else message)
+
+        project = normalized.get("project", {})
+        if not project.get("title"):
+            errors.append("项目标题不能为空")
         
         # 统计数据（包含新增字段）
         statistics = {
-            "chapters": len(data.get("chapters", [])),
-            "characters": len(data.get("characters", [])),
-            "outlines": len(data.get("outlines", [])),
-            "relationships": len(data.get("relationships", [])),
-            "organizations": len(data.get("organizations", [])),
-            "organization_members": len(data.get("organization_members", [])),
-            "writing_styles": len(data.get("writing_styles", [])),
-            "generation_history": len(data.get("generation_history", [])),
-            "careers": len(data.get("careers", [])),
-            "character_careers": len(data.get("character_careers", [])),
-            "story_memories": len(data.get("story_memories", [])),
-            "plot_analysis": len(data.get("plot_analysis", [])),
-            "foreshadows": len(data.get("foreshadows", [])),
-            "has_default_style": data.get("project_default_style") is not None
+            "chapters": len(normalized.get("chapters", [])),
+            "characters": len(normalized.get("characters", [])),
+            "outlines": len(normalized.get("outlines", [])),
+            "relationships": len(normalized.get("relationships", [])),
+            "organizations": len(normalized.get("organizations", [])),
+            "organization_members": len(normalized.get("organization_members", [])),
+            "writing_styles": len(normalized.get("writing_styles", [])),
+            "generation_history": len(normalized.get("generation_history", [])),
+            "careers": len(normalized.get("careers", [])),
+            "character_careers": len(normalized.get("character_careers", [])),
+            "story_memories": len(normalized.get("story_memories", [])),
+            "plot_analysis": len(normalized.get("plot_analysis", [])),
+            "foreshadows": len(normalized.get("foreshadows", [])),
+            "has_default_style": normalized.get("project_default_style") is not None
         }
         
         # 检查数据完整性
@@ -835,7 +1330,7 @@ class ImportExportService:
         if statistics["characters"] == 0:
             warnings.append("项目没有角色数据")
         
-        project_name = data.get("project", {}).get("title", "未知项目")
+        project_name = project.get("title", "未知项目")
         
         return ImportValidationResult(
             valid=len(errors) == 0,
@@ -878,6 +1373,7 @@ class ImportExportService:
                 )
             
             warnings.extend(validation.warnings)
+            data, _ = ImportExportService.normalize_import_data(data)
             
             logger.info(f"开始导入项目: {validation.project_name}")
             
@@ -1013,6 +1509,18 @@ class ImportExportService:
             
             # 提交事务
             await db.commit()
+
+            try:
+                rebuilt_vectors = await ImportExportService.rebuild_project_memory_index(
+                    new_project.id,
+                    user_id,
+                    db,
+                )
+                logger.info(f"重建项目向量记忆数: {rebuilt_vectors}")
+            except Exception as exc:
+                warning = f"向量记忆重建失败: {exc}"
+                warnings.append(warning)
+                logger.warning(warning)
             
             logger.info(f"项目导入完成: {new_project.id}")
             
@@ -1059,6 +1567,7 @@ class ImportExportService:
                 )
 
             warnings.extend(validation.warnings)
+            data, _ = ImportExportService.normalize_import_data(data)
 
             result = await db.execute(
                 select(Project).where(
@@ -1203,6 +1712,18 @@ class ImportExportService:
             await db.commit()
             await db.refresh(target_project)
 
+            try:
+                rebuilt_vectors = await ImportExportService.rebuild_project_memory_index(
+                    target_project.id,
+                    user_id,
+                    db,
+                )
+                logger.info(f"重建同步项目向量记忆数: {rebuilt_vectors}")
+            except Exception as exc:
+                warning = f"向量记忆重建失败: {exc}"
+                warnings.append(warning)
+                logger.warning(warning)
+
             return ImportResult(
                 success=True,
                 project_id=target_project.id,
@@ -1239,7 +1760,7 @@ class ImportExportService:
             
             # 处理expansion_plan
             expansion_plan = ch_data.get("expansion_plan")
-            if expansion_plan and isinstance(expansion_plan, dict):
+            if isinstance(expansion_plan, dict):
                 expansion_plan = json.dumps(expansion_plan, ensure_ascii=False)
             
             chapter = Chapter(
@@ -1651,6 +2172,7 @@ class ImportExportService:
         """导入故事记忆"""
         count = 0
         for mem_data in memories_data:
+            memory_id = mem_data.get("id") or str(uuid.uuid4())
             # 将章节标题转换为ID
             chapter_id = None
             chapter_title = mem_data.get("chapter_title")
@@ -1668,6 +2190,7 @@ class ImportExportService:
                 ]
             
             memory = StoryMemory(
+                id=memory_id,
                 project_id=project_id,
                 chapter_id=chapter_id,
                 memory_type=mem_data.get("memory_type"),
@@ -1682,7 +2205,8 @@ class ImportExportService:
                 chapter_position=mem_data.get("chapter_position", 0),
                 text_length=mem_data.get("text_length", 0),
                 is_foreshadow=mem_data.get("is_foreshadow", 0),
-                foreshadow_strength=mem_data.get("foreshadow_strength")
+                foreshadow_strength=mem_data.get("foreshadow_strength"),
+                vector_id=memory_id,
             )
             db.add(memory)
             count += 1

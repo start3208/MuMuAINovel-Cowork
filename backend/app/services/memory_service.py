@@ -394,6 +394,35 @@ class MemoryService:
         except Exception as e:
             logger.error(f"❌ 批量添加记忆失败: {str(e)}")
             return 0
+
+    async def rebuild_project_memories(
+        self,
+        user_id: str,
+        project_id: str,
+        memories: List[Dict[str, Any]]
+    ) -> int:
+        """
+        重建项目的向量记忆索引
+
+        说明：
+        - 先删除项目现有 collection
+        - 再根据传入记忆批量重建
+        """
+        try:
+            await self.delete_project_memories(user_id, project_id)
+            if not memories:
+                logger.info(f"ℹ️ 项目 {project_id[:8]} 没有可重建的记忆")
+                return 0
+            rebuilt = await self.batch_add_memories(
+                user_id=user_id,
+                project_id=project_id,
+                memories=memories,
+            )
+            logger.info(f"✅ 项目 {project_id[:8]} 的向量记忆已重建: {rebuilt}条")
+            return rebuilt
+        except Exception as e:
+            logger.error(f"❌ 重建项目向量记忆失败: {str(e)}")
+            return 0
     
     async def search_memories(
         self,

@@ -35,6 +35,8 @@ python workspace-studio/start_studio.py
 `Workspace Studio` 新创建的工作区默认采用双层目录：
 
 - `workspace/ws-项目名称-项目id/`：工作区容器目录
+- `workspace/ws-项目名称-项目id/CLAUDE.md`：给 Claude Code / Codex 的短提示词
+- `workspace/ws-项目名称-项目id/tool_README.md`：工具说明镜像，直接来自 `tools/README.md`
 - `workspace/ws-项目名称-项目id/项目名称/`：真实 Markdown 数据目录
 
 旧版单层目录工作区仍然兼容，Studio 会自动识别。
@@ -46,6 +48,15 @@ python workspace-studio/start_studio.py
 - 工作区根目录下以下划线或点开头的自定义目录不会被识别成一本书。
 - 工作区根目录下的 `CLAUDE.md`、`AGENTS.md`、`GEMINI.md` 这类说明文件不会因为保存而被删除。
 - 建议把草稿、笔记、缓存放进 `_notes/`、`_drafts/`、`.cache/` 这类目录。
+- `story-memories/` 现在按章节分目录存放，根 `_index.md` 只列第一层章节目录。
+
+## 备份管理
+
+- 统一备份目录：`workspace/_backup/`
+- `workspace/_backup/ws/<project_id>/`：本地工作区 JSON 备份
+- `workspace/_backup/mumu/<project_id>/`：MuMu 远端项目 JSON 备份
+- 拉取到工作区、同步、删除、导入备份、清理备份都需要二次确认
+- 每个项目每个来源最多保留 10 份备份；执行“清理备份”后会收缩到最近 5 份
 
 ## 可选：前端开发模式
 

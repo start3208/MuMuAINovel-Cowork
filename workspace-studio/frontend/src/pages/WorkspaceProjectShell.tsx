@@ -7,6 +7,7 @@ import {
   BankOutlined,
   BookOutlined,
   BulbOutlined,
+  DatabaseOutlined,
   EditOutlined,
   FileTextOutlined,
   FundOutlined,
@@ -140,6 +141,11 @@ export default function WorkspaceProjectShell() {
           label: <Link to={`/workspace/${workspaceName}/chapters`}>章节管理</Link>,
         },
         {
+          key: 'memories',
+          icon: <DatabaseOutlined />,
+          label: <Link to={`/workspace/${workspaceName}/memories`}>记忆管理</Link>,
+        },
+        {
           key: 'chapter-analysis',
           icon: <FundOutlined />,
           label: <Link to={`/workspace/${workspaceName}/chapter-analysis`}>剧情分析</Link>,
@@ -206,6 +212,11 @@ export default function WorkspaceProjectShell() {
       label: <Link to={`/workspace/${workspaceName}/chapters`}>章节管理</Link>,
     },
     {
+      key: 'memories',
+      icon: <DatabaseOutlined />,
+      label: <Link to={`/workspace/${workspaceName}/memories`}>记忆管理</Link>,
+    },
+    {
       key: 'foreshadows',
       icon: <BulbOutlined />,
       label: <Link to={`/workspace/${workspaceName}/foreshadows`}>伏笔管理</Link>,
@@ -236,6 +247,7 @@ export default function WorkspaceProjectShell() {
     if (path.includes('/relationships')) return 'relationships';
     if (path.includes('/outline')) return 'outline';
     if (path.includes('/chapters')) return 'chapters';
+    if (path.includes('/memories')) return 'memories';
     if (path.includes('/chapter-analysis')) return 'chapter-analysis';
     if (path.includes('/foreshadows')) return 'foreshadows';
     if (path.includes('/writing-styles')) return 'writing-styles';
