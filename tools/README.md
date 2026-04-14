@@ -17,6 +17,13 @@
 
 ## 工作区结构
 
+`Workspace Studio` 新创建的工作区默认采用双层目录：
+
+- `workspace/ws-项目名称-项目id/`：工作区容器目录
+- `workspace/ws-项目名称-项目id/项目名称/`：真实 Markdown 数据目录
+
+旧版单层工作区目录仍然兼容。
+
 - `project.md`：项目级信息
 - `project-default-style.md`：项目默认写作风格
 - `chapters/`：章节

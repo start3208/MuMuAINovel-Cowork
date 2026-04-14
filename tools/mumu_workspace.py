@@ -778,6 +778,48 @@ def is_workspace_directory(path: Path) -> bool:
     )
 
 
+def nested_workspace_directories(container_dir: Path) -> list[Path]:
+    if not container_dir.exists() or not container_dir.is_dir():
+        return []
+    return sorted(
+        child
+        for child in container_dir.iterdir()
+        if is_workspace_directory(child)
+    )
+
+
+def is_workspace_container_directory(path: Path) -> bool:
+    if not path.is_dir():
+        return False
+    if is_reserved_workspace_name(path.name) or path.name in WORKSPACE_EXCLUDED_ROOT_NAMES:
+        return False
+    if is_workspace_directory(path):
+        return True
+    return len(nested_workspace_directories(path)) == 1
+
+
+def resolve_workspace_data_dir(workspace_path: Path) -> Path:
+    if is_workspace_directory(workspace_path):
+        return workspace_path
+
+    nested_dirs = nested_workspace_directories(workspace_path)
+    if len(nested_dirs) == 1:
+        return nested_dirs[0]
+    if len(nested_dirs) > 1:
+        raise ValueError(
+            f"workspace container contains multiple nested workspace directories: {workspace_path}"
+        )
+    raise FileNotFoundError(f"workspace meta file not found under: {workspace_path}")
+
+
+def workspace_project_dir_name(project_title: str | None, fallback_name: str = "project") -> str:
+    raw_name = (project_title or "").strip() or fallback_name
+    name = sanitize_filename(raw_name)
+    if is_reserved_workspace_name(name):
+        name = name.lstrip("._ ")
+    return name or fallback_name
+
+
 def managed_workspace_paths() -> list[Path]:
     return [*WORKSPACE_MANAGED_ROOT_FILES, *(SECTION_PATHS[section] for section in TOP_LEVEL_ORDER)]
 
@@ -1322,11 +1364,15 @@ def write_workspace_from_data(
 
 def export_json_to_workspace(input_json: Path, output_dir: Path, force: bool) -> Path:
     data = json.loads(input_json.read_text(encoding="utf-8"))
-    return write_workspace_from_data(data, output_dir, force=force, source_json=input_json)
+    normalized_data, _ = normalize_export_dict(data)
+    project_title = normalized_data.get("project", {}).get("title", "")
+    data_dir = output_dir / workspace_project_dir_name(project_title)
+    return write_workspace_from_data(normalized_data, data_dir, force=force, source_json=input_json)
 
 
 def read_workspace_meta(workspace_dir: Path) -> dict[str, Any]:
-    meta_file = workspace_dir / ".mumu-workspace.toml"
+    data_dir = resolve_workspace_data_dir(workspace_dir)
+    meta_file = data_dir / ".mumu-workspace.toml"
     if not meta_file.exists():
         raise FileNotFoundError(f"missing workspace meta file: {meta_file}")
     meta, _ = parse_frontmatter(meta_file.read_text(encoding="utf-8"))
@@ -1352,7 +1398,8 @@ def parse_record_markdown(file_path: Path) -> dict[str, Any]:
 
 
 def workspace_to_export_dict(workspace_dir: Path) -> dict[str, Any]:
-    meta = read_workspace_meta(workspace_dir)
+    data_dir = resolve_workspace_data_dir(workspace_dir)
+    meta = read_workspace_meta(data_dir)
     data: dict[str, Any] = {
         "version": meta.get("version", ""),
         "export_time": meta.get("export_time", ""),
@@ -1361,7 +1408,7 @@ def workspace_to_export_dict(workspace_dir: Path) -> dict[str, Any]:
         data["source_project_id"] = meta.get("source_project_id")
 
     for section in TOP_LEVEL_ORDER:
-        path = workspace_dir / SECTION_PATHS[section]
+        path = data_dir / SECTION_PATHS[section]
         if section in SINGLE_RECORD_SECTIONS:
             if path.exists():
                 data[section] = parse_record_markdown(path)

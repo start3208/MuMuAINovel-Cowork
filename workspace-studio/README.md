@@ -30,6 +30,15 @@ python workspace-studio/start_studio.py
 - `frontend/`：独立 React 前端源码
 - `frontend-dist/`：前端构建产物
 
+## 工作区目录
+
+`Workspace Studio` 新创建的工作区默认采用双层目录：
+
+- `workspace/ws-项目名称-项目id/`：工作区容器目录
+- `workspace/ws-项目名称-项目id/项目名称/`：真实 Markdown 数据目录
+
+旧版单层目录工作区仍然兼容，Studio 会自动识别。
+
 ## 数据约定
 
 - `Workspace Studio` 不是通过调用命令行文本输出来保存数据，而是直接复用 `tools/mumu_workspace.py` 里的核心函数。

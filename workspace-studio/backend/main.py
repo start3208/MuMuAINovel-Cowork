@@ -24,9 +24,11 @@ from tools.mumu_workspace import (  # noqa: E402
     default_base_url,
     default_local_auth,
     export_json_to_workspace,
+    is_workspace_container_directory,
     is_reserved_workspace_name,
-    is_workspace_directory,
+    resolve_workspace_data_dir,
     validate_export_dict,
+    workspace_project_dir_name,
     workspace_to_export_dict,
     write_export_json,
     write_workspace_from_data,
@@ -76,9 +78,16 @@ def workspace_dir(name: str) -> Path:
     return WORKSPACE_ROOT / cleaned
 
 
+def workspace_data_dir(name: str, project_title: Optional[str] = None) -> Path:
+    container_dir = workspace_dir(name)
+    if container_dir.exists():
+        return resolve_workspace_data_dir(container_dir)
+    return container_dir / workspace_project_dir_name(project_title, fallback_name=name)
+
+
 def workspace_exists(name: str) -> bool:
     target = workspace_dir(name)
-    return is_workspace_directory(target)
+    return is_workspace_container_directory(target)
 
 
 def list_workspace_names() -> list[str]:
@@ -86,19 +95,21 @@ def list_workspace_names() -> list[str]:
         return []
     names: list[str] = []
     for item in WORKSPACE_ROOT.iterdir():
-        if is_workspace_directory(item):
+        if is_workspace_container_directory(item):
             names.append(item.name)
     return sorted(names)
 
 
 def build_workspace_summary(name: str) -> dict[str, Any]:
-    target = workspace_dir(name)
-    data = workspace_to_export_dict(target)
+    container_dir = workspace_dir(name)
+    data_dir = workspace_data_dir(name)
+    data = workspace_to_export_dict(data_dir)
     summary = validate_export_dict(data)
-    stat = target.stat()
+    stat = data_dir.stat()
     return {
         "name": name,
-        "path": str(target),
+        "path": str(data_dir),
+        "container_path": str(container_dir),
         "project_title": summary.project_name,
         "source_project_id": data.get("source_project_id"),
         "version": summary.version,
@@ -113,7 +124,7 @@ def load_workspace_data(name: str) -> dict[str, Any]:
     target = workspace_dir(name)
     if not target.exists():
         raise HTTPException(status_code=404, detail="工作区不存在")
-    return workspace_to_export_dict(target)
+    return workspace_to_export_dict(workspace_data_dir(name))
 
 
 def save_workspace_data(name: str, data: dict[str, Any]) -> dict[str, Any]:
@@ -123,7 +134,12 @@ def save_workspace_data(name: str, data: dict[str, Any]) -> dict[str, Any]:
     summary = validate_export_dict(data)
     if not summary.valid:
         raise HTTPException(status_code=400, detail={"errors": summary.errors, "warnings": summary.warnings})
-    write_workspace_from_data(data, target, force=True, source_json=Path(f"<workspace:{name}>"))
+    write_workspace_from_data(
+        data,
+        workspace_data_dir(name, data.get("project", {}).get("title")),
+        force=True,
+        source_json=Path(f"<workspace:{name}>"),
+    )
     return build_workspace_summary(name)
 
 
