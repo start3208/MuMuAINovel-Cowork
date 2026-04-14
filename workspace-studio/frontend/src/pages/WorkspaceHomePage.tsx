@@ -4,6 +4,7 @@ import {
   App,
   Button,
   Card,
+  Checkbox,
   Col,
   Input,
   Layout,
@@ -62,6 +63,7 @@ export default function WorkspaceHomePage() {
   const [mumuProjects, setMumuProjects] = useState<MumuProject[]>([]);
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [workspaceNameDrafts, setWorkspaceNameDrafts] = useState<Record<string, string>>({});
+  const [overwritePromptDrafts, setOverwritePromptDrafts] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(false);
 
   const loadAll = async () => {
@@ -90,14 +92,15 @@ export default function WorkspaceHomePage() {
     modal.confirm({
       title: '确认拉取到工作区',
       content: existing
-        ? `工作区 ${targetName} 已存在，继续会覆盖本地工作区内容。`
-        : `将从 MuMu 拉取《${project.title}》到工作区 ${targetName}。`,
+        ? `工作区 ${targetName} 已存在，继续会覆盖本地工作区内容。${overwritePromptDrafts[project.id] ? '本次会覆盖 CLAUDE.md。' : '本次默认保留已有 CLAUDE.md。'}`
+        : `将从 MuMu 拉取《${project.title}》到工作区 ${targetName}。${overwritePromptDrafts[project.id] ? '本次会覆盖 CLAUDE.md。' : '本次默认保留已有 CLAUDE.md。'}`,
       centered: true,
       onOk: async () => {
         try {
           const summary = await studioApi.exportWorkspace(
             project.id,
             (workspaceNameDrafts[project.id] || '').trim() || undefined,
+            Boolean(overwritePromptDrafts[project.id]),
           );
           message.success(`已生成工作区：${summary.name}`);
           await loadAll();
@@ -242,6 +245,17 @@ export default function WorkspaceHomePage() {
                             }))
                           }
                         />
+                        <Checkbox
+                          checked={Boolean(overwritePromptDrafts[record.id])}
+                          onChange={(event) =>
+                            setOverwritePromptDrafts((prev) => ({
+                              ...prev,
+                              [record.id]: event.target.checked,
+                            }))
+                          }
+                        >
+                          覆盖提示词
+                        </Checkbox>
                         <Button
                           size="small"
                           type="primary"

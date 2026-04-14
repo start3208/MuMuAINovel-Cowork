@@ -1725,12 +1725,19 @@ def write_workspace_readme(output_dir: Path, data: dict[str, Any]) -> None:
     (output_dir / "README.md").write_text(build_generic_readme_text() + "\n", encoding="utf-8")
 
 
-def write_workspace_claude_file(container_dir: Path, data_dir: Path, data: dict[str, Any]) -> None:
+def write_workspace_claude_file(
+    container_dir: Path,
+    data_dir: Path,
+    data: dict[str, Any],
+    overwrite_prompt_files: bool = False,
+) -> None:
     container_dir.mkdir(parents=True, exist_ok=True)
-    (container_dir / "CLAUDE.md").write_text(
-        build_workspace_claude_text(container_dir, data_dir, data) + "\n",
-        encoding="utf-8",
-    )
+    claude_path = container_dir / "CLAUDE.md"
+    if overwrite_prompt_files or not claude_path.exists():
+        claude_path.write_text(
+            build_workspace_claude_text(container_dir, data_dir, data) + "\n",
+            encoding="utf-8",
+        )
     (container_dir / "tool_README.md").write_text(
         build_workspace_tool_readme_text(),
         encoding="utf-8",
@@ -1808,13 +1815,23 @@ def write_workspace_from_data(
     return output_dir
 
 
-def export_json_to_workspace(input_json: Path, output_dir: Path, force: bool) -> Path:
+def export_json_to_workspace(
+    input_json: Path,
+    output_dir: Path,
+    force: bool,
+    overwrite_prompt_files: bool = False,
+) -> Path:
     data = json.loads(input_json.read_text(encoding="utf-8"))
     normalized_data, _ = normalize_export_dict(data)
     project_title = normalized_data.get("project", {}).get("title", "")
     data_dir = resolve_workspace_export_target(output_dir, project_title)
     written_dir = write_workspace_from_data(normalized_data, data_dir, force=force, source_json=input_json)
-    write_workspace_claude_file(output_dir, written_dir, normalized_data)
+    write_workspace_claude_file(
+        output_dir,
+        written_dir,
+        normalized_data,
+        overwrite_prompt_files=overwrite_prompt_files,
+    )
     return written_dir
 
 

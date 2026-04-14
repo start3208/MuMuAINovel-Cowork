@@ -49,6 +49,7 @@ TRIMMED_BACKUPS_PER_PROJECT = 5
 class ExportWorkspaceRequest(BaseModel):
     project_id: str
     workspace_name: Optional[str] = None
+    overwrite_prompt_files: bool = False
     confirmed: bool = False
 
 
@@ -171,7 +172,12 @@ def save_workspace_data(name: str, data: dict[str, Any]) -> dict[str, Any]:
         force=True,
         source_json=Path(f"<workspace:{name}>"),
     )
-    write_workspace_claude_file(workspace_dir(name), data_dir, data)
+    write_workspace_claude_file(
+        workspace_dir(name),
+        data_dir,
+        data,
+        overwrite_prompt_files=False,
+    )
     return build_workspace_summary(name)
 
 
@@ -481,7 +487,11 @@ def fetch_remote_export(project_id: str) -> dict[str, Any]:
     return json.loads(content.decode("utf-8"))
 
 
-def pull_project_to_workspace(project_id: str, workspace_name: Optional[str]) -> dict[str, Any]:
+def pull_project_to_workspace(
+    project_id: str,
+    workspace_name: Optional[str],
+    overwrite_prompt_files: bool = False,
+) -> dict[str, Any]:
     client = make_client()
     client.login()
 
@@ -531,7 +541,12 @@ def pull_project_to_workspace(project_id: str, workspace_name: Optional[str]) ->
         data=exported_data,
         workspace_name=name,
     )
-    export_json_to_workspace(export_path, workspace_dir(name), force=True)
+    export_json_to_workspace(
+        export_path,
+        workspace_dir(name),
+        force=True,
+        overwrite_prompt_files=overwrite_prompt_files,
+    )
     create_json_backup(
         source_type="ws",
         project_id=project_id,
@@ -638,7 +653,11 @@ def api_mumu_projects() -> Any:
 @app.post("/api/mumu/export-workspace")
 def api_export_workspace(data: ExportWorkspaceRequest) -> dict[str, Any]:
     ensure_confirmation(data.confirmed, "拉取到工作区")
-    return pull_project_to_workspace(data.project_id, data.workspace_name)
+    return pull_project_to_workspace(
+        data.project_id,
+        data.workspace_name,
+        overwrite_prompt_files=data.overwrite_prompt_files,
+    )
 
 
 @app.get("/api/workspaces")
@@ -770,6 +789,7 @@ def api_import_backup_to_workspace(payload: ImportBackupRequest) -> dict[str, An
         workspace_dir(workspace_name),
         workspace_data_dir(workspace_name, data.get("project", {}).get("title")),
         data,
+        overwrite_prompt_files=False,
     )
     create_json_backup(
         source_type="ws",

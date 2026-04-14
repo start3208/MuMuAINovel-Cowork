@@ -33,10 +33,11 @@ api.interceptors.response.use(
 
 export const studioApi = {
   getMumuProjects: () => api.get<any, MumuProjectListResponse>('/mumu/projects'),
-  exportWorkspace: (projectId: string, workspaceName?: string) =>
+  exportWorkspace: (projectId: string, workspaceName?: string, overwritePromptFiles = false) =>
     api.post<any, WorkspaceSummary>('/mumu/export-workspace', {
       project_id: projectId,
       workspace_name: workspaceName || null,
+      overwrite_prompt_files: overwritePromptFiles,
       confirmed: true,
     }),
   getWorkspaces: () => api.get<any, WorkspaceListResponse>('/workspaces'),
