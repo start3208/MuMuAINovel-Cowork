@@ -29,7 +29,7 @@ import {
   ThunderboltOutlined,
 } from '@ant-design/icons';
 import { useWorkspaceContext } from '../workspace-context';
-import { cloneData, updateOutlineAtIndex } from '../workspace-utils';
+import { deleteOutlineAtIndex, ensureOutlineEntities, updateOutlineAtIndex } from '../workspace-utils';
 
 const { TextArea } = Input;
 const { Title, Text, Paragraph } = Typography;
@@ -141,6 +141,23 @@ function linesToList(text: string): string[] | undefined {
   return items.length > 0 ? items : undefined;
 }
 
+function getOutlineLinkedForeshadows(data: any, outline: any) {
+  const relatedChapters = (data.chapters || []).filter((chapter: any) => {
+    if (data.project.outline_mode === 'one-to-one') {
+      return chapter.chapter_number === outline.order_index || chapter.outline_title === outline.title;
+    }
+    return chapter.outline_title === outline.title;
+  });
+  const chapterNumbers = new Set(relatedChapters.map((chapter: any) => chapter.chapter_number));
+  const all = data.foreshadows || [];
+  return {
+    relatedChapters,
+    planted: all.filter((item: any) => chapterNumbers.has(item.plant_chapter_number)),
+    targetResolve: all.filter((item: any) => chapterNumbers.has(item.target_resolve_chapter_number)),
+    resolved: all.filter((item: any) => chapterNumbers.has(item.actual_resolve_chapter_number)),
+  };
+}
+
 export default function WorkspaceOutlinePage() {
   const { message, modal } = App.useApp();
   const { data, saveData } = useWorkspaceContext();
@@ -212,9 +229,11 @@ export default function WorkspaceOutlinePage() {
       ...currentStructure,
       title: values.title,
       summary: values.content,
+      content: values.content,
       characters: [...characters, ...organizations],
       scenes: editorTextToScenes(values.scenes || ''),
       key_points: linesToList(values.key_points || ''),
+      key_events: currentStructure.key_events || linesToList(values.key_points || ''),
       emotion: values.emotion || undefined,
       goal: values.goal || undefined,
     };
@@ -225,10 +244,26 @@ export default function WorkspaceOutlinePage() {
       content: values.content,
       structure: JSON.stringify(nextStructure, null, 2),
     });
+    const ensured = ensureOutlineEntities(
+      nextData,
+      getCharacterNames([...characters, ...organizations]),
+      getOrganizationNames([...characters, ...organizations]),
+    );
 
     try {
-      await saveData(nextData);
-      message.success('大纲已更新');
+      await saveData(ensured.data);
+      if (ensured.createdCharacters.length > 0 || ensured.createdOrganizations.length > 0) {
+        const parts: string[] = [];
+        if (ensured.createdCharacters.length > 0) {
+          parts.push(`新增角色 ${ensured.createdCharacters.join('、')}`);
+        }
+        if (ensured.createdOrganizations.length > 0) {
+          parts.push(`新增组织 ${ensured.createdOrganizations.join('、')}`);
+        }
+        message.success(`大纲已更新，并自动补充实体：${parts.join('；')}`);
+      } else {
+        message.success('大纲已更新');
+      }
       closeEditModal();
     } catch {
       // saveData handles errors
@@ -236,18 +271,69 @@ export default function WorkspaceOutlinePage() {
   };
 
   const handleDelete = async (outline: any) => {
-    const relatedChapters = data.chapters.filter((chapter) => chapter.outline_title === outline.title);
-    const content = relatedChapters.length > 0 ? `同时删除关联章节（${relatedChapters.length}章）` : '仅删除本地工作区中的大纲记录';
+    const linked = getOutlineLinkedForeshadows(data, outline);
     modal.confirm({
       title: '确认删除大纲',
-      content,
       icon: <ExclamationCircleOutlined />,
       centered: true,
+      width: 760,
+      content: (
+        <Space direction="vertical" style={{ width: '100%' }} size={12}>
+          <Paragraph style={{ marginBottom: 0 }}>
+            将删除大纲《{outline.title}》。
+          </Paragraph>
+          {linked.relatedChapters.length > 0 ? (
+            <div>
+              <Text strong>会一起删除关联章节：</Text>
+              <Space wrap>
+                {linked.relatedChapters.map((chapter: any) => (
+                  <Tag key={`${chapter.chapter_number}-${chapter.title}`}>第{chapter.chapter_number}章《{chapter.title}》</Tag>
+                ))}
+              </Space>
+            </div>
+          ) : (
+            <Text type="secondary">未找到关联章节，只会删除本地大纲记录。</Text>
+          )}
+          {(linked.planted.length > 0 || linked.targetResolve.length > 0 || linked.resolved.length > 0) && (
+            <>
+              <Text strong>检测到关联伏笔：</Text>
+              {linked.planted.length > 0 && (
+                <div>
+                  <Text>关联章节埋入：</Text>
+                  <Space wrap>
+                    {linked.planted.map((item: any) => (
+                      <Tag key={`outline-planted-${item.id || item.title}`}>{item.title || '未命名伏笔'}</Tag>
+                    ))}
+                  </Space>
+                </div>
+              )}
+              {linked.targetResolve.length > 0 && (
+                <div>
+                  <Text>关联章节计划回收：</Text>
+                  <Space wrap>
+                    {linked.targetResolve.map((item: any) => (
+                      <Tag color="orange" key={`outline-target-${item.id || item.title}`}>{item.title || '未命名伏笔'}</Tag>
+                    ))}
+                  </Space>
+                </div>
+              )}
+              {linked.resolved.length > 0 && (
+                <div>
+                  <Text>关联章节已回收：</Text>
+                  <Space wrap>
+                    {linked.resolved.map((item: any) => (
+                      <Tag color="blue" key={`outline-resolved-${item.id || item.title}`}>{item.title || '未命名伏笔'}</Tag>
+                    ))}
+                  </Space>
+                </div>
+              )}
+            </>
+          )}
+        </Space>
+      ),
       onOk: async () => {
-        const nextData = cloneData(data);
-        nextData.outlines = nextData.outlines.filter((item: any) => item !== outline);
-        nextData.chapters = nextData.chapters.filter((chapter: any) => chapter.outline_title !== outline.title);
         try {
+          const nextData = deleteOutlineAtIndex(data, outlines.indexOf(outline));
           await saveData(nextData);
           message.success('大纲已删除');
         } catch {

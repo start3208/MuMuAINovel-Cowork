@@ -9,6 +9,7 @@ import {
   Form,
   Input,
   InputNumber,
+  List,
   Modal,
   Row,
   Select,
@@ -26,7 +27,7 @@ import {
   TrophyOutlined,
 } from '@ant-design/icons';
 import { useWorkspaceContext } from '../workspace-context';
-import { cloneData, deleteCareerAtIndex, updateCareerAtIndex } from '../workspace-utils';
+import { cloneData, deleteCareerAtIndex, getCareerUsageCount, updateCareerAtIndex } from '../workspace-utils';
 
 const { TextArea } = Input;
 const { Title, Text, Paragraph } = Typography;
@@ -171,6 +172,41 @@ export default function WorkspaceCareersPage() {
   };
 
   const handleDelete = (index: number) => {
+    const career = careers[index];
+    if (!career) return;
+    const usageItems = (data.character_careers || []).filter((mapping) => mapping.career_name === career.name);
+    const usageCount = getCareerUsageCount(data, career.name);
+    if (usageCount > 0) {
+      modal.warning({
+        title: '该职业仍在使用中',
+        centered: true,
+        width: 640,
+        content: (
+          <Space direction="vertical" style={{ width: '100%' }} size={12}>
+            <Paragraph style={{ marginBottom: 0 }}>
+              不能删除职业 <Text strong>{career.name}</Text>，当前仍有 {usageCount} 个角色职业关联绑定它：
+            </Paragraph>
+            <List
+              size="small"
+              bordered
+              dataSource={usageItems}
+              renderItem={(item: any) => (
+                <List.Item>
+                  <Space wrap>
+                    <Tag color="blue">{item.character_name}</Tag>
+                    <Tag>{item.career_type}</Tag>
+                    <Text type="secondary">当前阶段：{item.current_stage ?? 1}</Text>
+                  </Space>
+                </List.Item>
+              )}
+            />
+            <Text type="secondary">请先在角色职业关联中移除这些绑定，再删除职业。</Text>
+          </Space>
+        ),
+        okText: '知道了',
+      });
+      return;
+    }
     modal.confirm({
       title: '确认删除职业',
       content: '这个操作只会修改本地工作区，不会立即同步到 MuMu。',

@@ -3,7 +3,7 @@ import { App, AutoComplete, Button, Card, Form, Input, Modal, Select, Slider, Sp
 import { ApartmentOutlined, EditOutlined, PlusOutlined, UserOutlined } from '@ant-design/icons';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useWorkspaceContext } from '../workspace-context';
-import { cloneData } from '../workspace-utils';
+import { updateRelationships } from '../workspace-utils';
 
 const { TextArea } = Input;
 
@@ -49,19 +49,20 @@ export default function WorkspaceRelationshipsPage() {
   }, {} as Record<string, RelationshipType[]>);
 
   const handleCreateOrUpdate = async (values: any) => {
-    const nextData = cloneData(data);
+    const nextRelationships = [...relationships];
     if (editingIndex !== null) {
-      nextData.relationships[editingIndex] = {
-        ...nextData.relationships[editingIndex],
+      nextRelationships[editingIndex] = {
+        ...nextRelationships[editingIndex],
         ...values,
       };
     } else {
-      nextData.relationships.push({
+      nextRelationships.push({
         ...values,
         source: 'manual',
       });
     }
     try {
+      const nextData = updateRelationships(data, nextRelationships as any);
       await saveData(nextData);
       message.success(editingIndex !== null ? '关系更新成功' : '关系创建成功');
       setIsModalOpen(false);
@@ -71,9 +72,9 @@ export default function WorkspaceRelationshipsPage() {
   };
 
   const handleDelete = async (index: number) => {
-    const nextData = cloneData(data);
-    nextData.relationships = nextData.relationships.filter((_: any, currentIndex: number) => currentIndex !== index);
+    const nextRelationships = relationships.filter((_: any, currentIndex: number) => currentIndex !== index);
     try {
+      const nextData = updateRelationships(data, nextRelationships as any);
       await saveData(nextData);
       message.success('关系删除成功');
     } catch {}

@@ -4,12 +4,14 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 import json
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Any
 
 from app.database import get_db
 from app.utils.sse_response import SSEResponse, create_sse_response, WizardProgressTracker
 from app.models.character import Character
 from app.models.project import Project
+from app.models.outline import Outline
+from app.models.chapter import Chapter
 from app.models.generation_history import GenerationHistory
 from app.models.relationship import CharacterRelationship, Organization, OrganizationMember, RelationshipType
 from app.schemas.character import (
@@ -29,6 +31,80 @@ from app.api.common import verify_project_access
 
 router = APIRouter(prefix="/characters", tags=["角色管理"])
 logger = get_logger(__name__)
+
+
+def _replace_name_in_list(values: Any, old_name: str, new_name: str) -> Any:
+    if not isinstance(values, list):
+        return values
+    return [item for item in [(new_name if item == old_name else item) for item in values] if item != ""]
+
+
+def _update_outline_structure_entity_refs(structure: str | None, old_name: str, new_name: str) -> str | None:
+    if not structure:
+        return structure
+    try:
+        parsed = json.loads(structure)
+    except json.JSONDecodeError:
+        return structure
+
+    if isinstance(parsed.get("characters"), list):
+        next_entries = []
+        for entry in parsed["characters"]:
+            if isinstance(entry, dict):
+                next_name = new_name if entry.get("name") == old_name else entry.get("name")
+                if next_name:
+                    next_entries.append({**entry, "name": next_name})
+            elif isinstance(entry, str):
+                next_name = new_name if entry == old_name else entry
+                if next_name:
+                    next_entries.append(next_name)
+        parsed["characters"] = next_entries
+
+    if isinstance(parsed.get("scenes"), list):
+        next_scenes = []
+        for scene in parsed["scenes"]:
+            if isinstance(scene, dict):
+                next_scenes.append(
+                    {
+                        **scene,
+                        "characters": _replace_name_in_list(scene.get("characters"), old_name, new_name),
+                    }
+                )
+            else:
+                next_scenes.append(scene)
+        parsed["scenes"] = next_scenes
+
+    return json.dumps(parsed, ensure_ascii=False)
+
+
+def _update_chapter_expansion_plan_entity_refs(expansion_plan: str | None, old_name: str, new_name: str) -> str | None:
+    if not expansion_plan:
+        return expansion_plan
+    try:
+        parsed = json.loads(expansion_plan)
+    except json.JSONDecodeError:
+        return expansion_plan
+
+    if isinstance(parsed.get("character_focus"), list):
+        parsed["character_focus"] = _replace_name_in_list(parsed.get("character_focus"), old_name, new_name)
+
+    return json.dumps(parsed, ensure_ascii=False)
+
+
+async def _sync_outline_entity_references(project_id: str, old_name: str, new_name: str, db: AsyncSession) -> None:
+    outlines_result = await db.execute(
+        select(Outline).where(Outline.project_id == project_id)
+    )
+    outlines = outlines_result.scalars().all()
+    for outline in outlines:
+        outline.structure = _update_outline_structure_entity_refs(outline.structure, old_name, new_name)
+
+    chapters_result = await db.execute(
+        select(Chapter).where(Chapter.project_id == project_id)
+    )
+    chapters = chapters_result.scalars().all()
+    for chapter in chapters:
+        chapter.expansion_plan = _update_chapter_expansion_plan_entity_refs(chapter.expansion_plan, old_name, new_name)
 
 
 async def _build_relationships_summary(character_id: str, project_id: str, db: AsyncSession) -> str:
@@ -361,6 +437,7 @@ async def update_character(
     
     # 更新字段
     update_data = character_update.model_dump(exclude_unset=True)
+    old_name = character.name
     
     # 如果是组织，需要同步更新 Organization 表的字段
     org_fields = {}
@@ -513,6 +590,9 @@ async def update_character(
     update_data.pop('organization_members', None)
     for field, value in update_data.items():
         setattr(character, field, value)
+
+    if character.name != old_name:
+        await _sync_outline_entity_references(character.project_id, old_name, character.name, db)
     
     # 如果是组织且有需要同步的字段，更新 Organization 表
     if character.is_organization and org_fields:
@@ -620,6 +700,7 @@ async def delete_character(
         logger.info(f"删除角色职业关联：character_id={character_id}, career_id={relation.career_id}, type={relation.career_type}")
     
     # 删除角色
+    await _sync_outline_entity_references(character.project_id, character.name, "", db)
     await db.delete(character)
     await db.commit()
     

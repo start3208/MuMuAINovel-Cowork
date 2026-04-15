@@ -7,6 +7,7 @@ import {
   Empty,
   Form,
   Input,
+  InputNumber,
   Modal,
   Row,
   Select,
@@ -17,7 +18,7 @@ import {
 } from 'antd';
 import { PlusOutlined, TeamOutlined, UserOutlined } from '@ant-design/icons';
 import { useWorkspaceContext } from '../workspace-context';
-import { cloneData } from '../workspace-utils';
+import { cloneData, deleteCharacterAtIndex, syncWorkspaceDerivedFields, updateCharacterAtIndex } from '../workspace-utils';
 import type { WorkspaceCharacter } from '../types';
 
 const { Title, Paragraph, Text } = Typography;
@@ -42,6 +43,51 @@ function normalizeTraits(value: WorkspaceCharacter['traits']): string[] {
     .filter(Boolean);
 }
 
+function normalizeOrganizationCharacter(
+  item: WorkspaceCharacter,
+  organization?: Record<string, any>,
+): WorkspaceCharacter {
+  return {
+    ...item,
+    power_level: organization?.power_level ?? item.power_level,
+    location: organization?.location ?? item.location,
+    motto: organization?.motto ?? item.motto,
+    color: organization?.color ?? item.color,
+  };
+}
+
+function buildCharacterPayload(values: any, createType: 'character' | 'organization'): WorkspaceCharacter {
+  return {
+    name: values.name,
+    age: values.age ?? '',
+    gender: values.gender ?? '',
+    is_organization: createType === 'organization',
+    role_type: values.role_type ?? (createType === 'organization' ? 'supporting' : 'supporting'),
+    personality: values.personality ?? '',
+    background: values.background ?? '',
+    appearance: values.appearance ?? '',
+    relationships: values.relationships ?? '',
+    traits: values.traits_text
+      ? values.traits_text
+          .split(/[，,、\n]/)
+          .map((item: string) => item.trim())
+          .filter(Boolean)
+      : [],
+    organization_type: values.organization_type ?? '',
+    organization_purpose: values.organization_purpose ?? '',
+    organization_members: values.organization_members ?? '',
+    avatar_url: values.avatar_url ?? '',
+    main_career_id: values.main_career_id ?? '',
+    main_career_stage: values.main_career_stage ?? null,
+    sub_careers: values.sub_careers ?? '',
+    power_level: values.power_level ?? null,
+    location: values.location ?? '',
+    motto: values.motto ?? '',
+    color: values.color ?? '',
+    created_at: values.created_at ?? '',
+  };
+}
+
 export default function WorkspaceCharactersPage() {
   const { message } = App.useApp();
   const { data, saveData } = useWorkspaceContext();
@@ -52,19 +98,33 @@ export default function WorkspaceCharactersPage() {
   const [form] = Form.useForm();
 
   const allCharacters = (data.characters || []) as WorkspaceCharacter[];
+  const organizationDetailsMap = useMemo(
+    () =>
+      new Map(
+        (data.organizations || []).map((item: any) => [item.character_name, item]),
+      ),
+    [data.organizations],
+  );
   const displayList = useMemo(() => {
     if (activeTab === 'character') return allCharacters.filter((item) => !item.is_organization);
-    if (activeTab === 'organization') return allCharacters.filter((item) => item.is_organization);
+    if (activeTab === 'organization') {
+      return allCharacters
+        .filter((item) => item.is_organization)
+        .map((item) => normalizeOrganizationCharacter(item, organizationDetailsMap.get(item.name)));
+    }
     return allCharacters;
-  }, [activeTab, allCharacters]);
+  }, [activeTab, allCharacters, organizationDetailsMap]);
 
   const openModal = (item?: WorkspaceCharacter, index?: number) => {
     if (item && index !== undefined) {
       setEditingIndex(index);
       setCreateType(item.is_organization ? 'organization' : 'character');
+      const mergedItem = item.is_organization
+        ? normalizeOrganizationCharacter(item, organizationDetailsMap.get(item.name))
+        : item;
       form.setFieldsValue({
-        ...item,
-        traits_text: normalizeTraits(item.traits).join('，'),
+        ...mergedItem,
+        traits_text: normalizeTraits(mergedItem.traits).join('，'),
       });
     } else {
       setEditingIndex(null);
@@ -80,41 +140,48 @@ export default function WorkspaceCharactersPage() {
     form.resetFields();
   };
 
-  const persistCharacters = async (nextCharacters: WorkspaceCharacter[]) => {
-    const nextData = cloneData(data);
-    nextData.characters = nextCharacters as any;
-    await saveData(nextData);
+  const persistData = async (nextData: typeof data) => {
+    await saveData(syncWorkspaceDerivedFields(nextData as any));
   };
 
   const handleSubmit = async (values: any) => {
-    const payload: WorkspaceCharacter = {
-      ...values,
-      is_organization: createType === 'organization',
-      traits: values.traits_text
-        ? values.traits_text
-            .split(/[，,、\n]/)
-            .map((item: string) => item.trim())
-            .filter(Boolean)
-        : [],
-    };
-    delete (payload as any).traits_text;
+    const nextData = cloneData(data);
+    const payload = buildCharacterPayload(values, createType);
 
-    const nextCharacters = [...allCharacters];
     if (editingIndex !== null) {
-      nextCharacters[editingIndex] = {
-        ...nextCharacters[editingIndex],
+      const previous = nextData.characters[editingIndex] as WorkspaceCharacter;
+      const merged = {
+        ...previous,
         ...payload,
       };
+      const updated = updateCharacterAtIndex(nextData as any, editingIndex, merged);
+      try {
+        await persistData(updated as any);
+        message.success('角色已更新');
+        closeModal();
+      } catch {
+        // saveData handles errors
+      }
     } else {
-      nextCharacters.push(payload);
-    }
-
-    try {
-      await persistCharacters(nextCharacters);
-      message.success(editingIndex !== null ? '角色已更新' : `${createType === 'character' ? '角色' : '组织'}已创建`);
-      closeModal();
-    } catch {
-      // saveData handles errors
+      nextData.characters.push(payload as any);
+      if (createType === 'organization') {
+        nextData.organizations.push({
+          character_name: payload.name,
+          parent_org_name: '',
+          power_level: values.power_level ?? null,
+          member_count: 0,
+          location: values.location ?? '',
+          motto: values.motto ?? '',
+          color: values.color ?? '',
+        } as any);
+      }
+      try {
+        await persistData(nextData);
+        message.success(`${createType === 'character' ? '角色' : '组织'}已创建`);
+        closeModal();
+      } catch {
+        // saveData handles errors
+      }
     }
   };
 
@@ -124,9 +191,10 @@ export default function WorkspaceCharactersPage() {
       content: '此操作只影响本地工作区，不会立即同步到 MuMu。',
       centered: true,
       onOk: async () => {
-        const nextCharacters = allCharacters.filter((_, currentIndex) => currentIndex !== index);
+        closeModal();
         try {
-          await persistCharacters(nextCharacters);
+          const nextData = deleteCharacterAtIndex(data as any, index);
+          await persistData(nextData as any);
           message.success('已删除');
         } catch {
           // saveData handles errors
@@ -387,7 +455,7 @@ export default function WorkspaceCharactersPage() {
                 </Col>
                 <Col span={6}>
                   <Form.Item label="势力等级" name="power_level">
-                    <Input placeholder="0-100" />
+                    <InputNumber min={0} max={100} style={{ width: '100%' }} placeholder="0-100" />
                   </Form.Item>
                 </Col>
               </Row>

@@ -9,7 +9,6 @@ import {
   List,
   Modal,
   Pagination,
-  Popconfirm,
   Select,
   Space,
   Tag,
@@ -26,10 +25,22 @@ import {
   ThunderboltOutlined,
 } from '@ant-design/icons';
 import { useWorkspaceContext } from '../workspace-context';
-import { cloneData, updateChapterAtIndex } from '../workspace-utils';
+import { deleteChapterAtIndex, updateChapterAtIndex } from '../workspace-utils';
 
 const { TextArea } = Input;
 const { Title, Paragraph, Text } = Typography;
+
+function getLinkedForeshadows(data: any, chapterNumber?: number) {
+  if (chapterNumber === undefined || chapterNumber === null) {
+    return { planted: [], targetResolve: [], resolved: [] };
+  }
+  const all = data.foreshadows || [];
+  return {
+    planted: all.filter((item: any) => item.plant_chapter_number === chapterNumber),
+    targetResolve: all.filter((item: any) => item.target_resolve_chapter_number === chapterNumber),
+    resolved: all.filter((item: any) => item.actual_resolve_chapter_number === chapterNumber),
+  };
+}
 
 export default function WorkspaceChaptersPage() {
   const { message, modal } = App.useApp();
@@ -86,23 +97,22 @@ export default function WorkspaceChaptersPage() {
   };
 
   const handleSave = async (values: any) => {
-    const nextData = cloneData(data);
     if (editingIndex !== null) {
       const chapter = chapters[editingIndex];
-      const absoluteIndex = nextData.chapters.indexOf(chapter);
+      const absoluteIndex = data.chapters.indexOf(chapter);
       const nextChapter = {
         ...chapter,
         ...values,
         word_count: (values.content || '').length,
       };
-      const updated = updateChapterAtIndex(nextData, absoluteIndex, nextChapter as any);
-      updated.project.current_words = updated.chapters.reduce((sum: number, item: any) => sum + (item.word_count || 0), 0);
+      const updated = updateChapterAtIndex(data, absoluteIndex, nextChapter as any);
       try {
         await saveData(updated);
         message.success('章节已更新');
         closeEditor();
       } catch {}
     } else {
+      const nextData = JSON.parse(JSON.stringify(data));
       nextData.chapters.push({
         ...values,
         word_count: (values.content || '').length,
@@ -117,13 +127,63 @@ export default function WorkspaceChaptersPage() {
   };
 
   const handleDelete = async (chapter: any) => {
-    const nextData = cloneData(data);
-    nextData.chapters = nextData.chapters.filter((item: any) => item !== chapter);
-    nextData.project.current_words = nextData.chapters.reduce((sum: number, item: any) => sum + (item.word_count || 0), 0);
-    try {
-      await saveData(nextData);
-      message.success('章节已删除');
-    } catch {}
+    const linked = getLinkedForeshadows(data, chapter.chapter_number);
+    modal.confirm({
+      title: '确认删除章节',
+      centered: true,
+      width: 720,
+      content: (
+        <Space direction="vertical" style={{ width: '100%' }} size={12}>
+          <Paragraph style={{ marginBottom: 0 }}>
+            将删除第{chapter.chapter_number}章《{chapter.title}》。
+          </Paragraph>
+          {(linked.planted.length > 0 || linked.targetResolve.length > 0 || linked.resolved.length > 0) ? (
+            <>
+              <Text strong>检测到关联伏笔：</Text>
+              {linked.planted.length > 0 && (
+                <div>
+                  <Text>本章埋入：</Text>
+                  <Space wrap>
+                    {linked.planted.map((item: any) => (
+                      <Tag key={`planted-${item.id || item.title}`}>{item.title || '未命名伏笔'}</Tag>
+                    ))}
+                  </Space>
+                </div>
+              )}
+              {linked.targetResolve.length > 0 && (
+                <div>
+                  <Text>计划在本章回收：</Text>
+                  <Space wrap>
+                    {linked.targetResolve.map((item: any) => (
+                      <Tag color="orange" key={`target-${item.id || item.title}`}>{item.title || '未命名伏笔'}</Tag>
+                    ))}
+                  </Space>
+                </div>
+              )}
+              {linked.resolved.length > 0 && (
+                <div>
+                  <Text>已在本章回收：</Text>
+                  <Space wrap>
+                    {linked.resolved.map((item: any) => (
+                      <Tag color="blue" key={`resolved-${item.id || item.title}`}>{item.title || '未命名伏笔'}</Tag>
+                    ))}
+                  </Space>
+                </div>
+              )}
+            </>
+          ) : (
+            <Text type="secondary">未检测到关联伏笔。</Text>
+          )}
+        </Space>
+      ),
+      onOk: async () => {
+        try {
+          const nextData = deleteChapterAtIndex(data, chapters.indexOf(chapter));
+          await saveData(nextData);
+          message.success('章节已删除');
+        } catch {}
+      },
+    });
   };
 
   if (chapters.length === 0) {
@@ -183,11 +243,9 @@ export default function WorkspaceChaptersPage() {
                       <Button icon={<FormOutlined />} size="small" onClick={() => openEditor(chapter, chapters.indexOf(chapter))}>
                         编辑
                       </Button>
-                      <Popconfirm title="确定删除章节吗？" onConfirm={() => handleDelete(chapter)}>
-                        <Button danger icon={<DeleteOutlined />} size="small">
-                          删除
-                        </Button>
-                      </Popconfirm>
+                      <Button danger icon={<DeleteOutlined />} size="small" onClick={() => handleDelete(chapter)}>
+                        删除
+                      </Button>
                     </Space>
                   }
                 >

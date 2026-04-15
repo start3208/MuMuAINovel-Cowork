@@ -20,7 +20,14 @@ import {
 import { BankOutlined, DeleteOutlined, EditOutlined, PlusOutlined, UnorderedListOutlined, UserOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { useWorkspaceContext } from '../workspace-context';
-import { cloneData } from '../workspace-utils';
+import {
+  cloneData,
+  deleteCharacterAtIndex,
+  syncWorkspaceDerivedFields,
+  updateCharacterAtIndex,
+  updateOrganizationMembers,
+  updateOrganizations,
+} from '../workspace-utils';
 import type { WorkspaceCharacter } from '../types';
 
 interface LocalOrganization {
@@ -134,6 +141,19 @@ export default function WorkspaceOrganizationsPage() {
     () => (currentOrg ? members.filter((member) => member.organization_name === currentOrg.character_name) : []),
     [currentOrg, members],
   );
+  const currentOrgFormValues = useMemo(() => {
+    if (!currentOrg || !currentOrgCharacter) return null;
+    return {
+      name: currentOrgCharacter.name,
+      organization_type: currentOrgCharacter.organization_type,
+      organization_purpose: currentOrgCharacter.organization_purpose,
+      background: currentOrgCharacter.background,
+      power_level: currentOrg.power_level ?? currentOrgCharacter.power_level,
+      location: currentOrg.location ?? currentOrgCharacter.location,
+      motto: currentOrg.motto ?? currentOrgCharacter.motto,
+      color: currentOrg.color ?? currentOrgCharacter.color,
+    };
+  }, [currentOrg, currentOrgCharacter]);
 
   const availableCharacters = useMemo(() => {
     return (data.characters as WorkspaceCharacter[])
@@ -141,8 +161,13 @@ export default function WorkspaceOrganizationsPage() {
       .filter((item) => !currentMembers.some((member) => member.character_name === item.name));
   }, [data.characters, currentMembers]);
 
+  useEffect(() => {
+    if (!isEditOrgModalOpen || !currentOrgFormValues) return;
+    editOrgForm.setFieldsValue(currentOrgFormValues);
+  }, [isEditOrgModalOpen, currentOrgFormValues, editOrgForm]);
+
   const persist = async (nextData: typeof data) => {
-    await saveData(nextData);
+    await saveData(syncWorkspaceDerivedFields(nextData as any));
   };
 
   const syncMemberCount = (nextData: typeof data, organizationName: string) => {
@@ -153,59 +178,28 @@ export default function WorkspaceOrganizationsPage() {
   };
 
   const openEditOrgModal = () => {
-    if (!currentOrg || !currentOrgCharacter) return;
-    editOrgForm.setFieldsValue({
-      name: currentOrgCharacter.name,
-      organization_type: currentOrgCharacter.organization_type,
-      organization_purpose: currentOrgCharacter.organization_purpose,
-      background: currentOrgCharacter.background,
-      power_level: currentOrg.power_level,
-      location: currentOrg.location,
-      motto: currentOrg.motto,
-      color: currentOrg.color,
-    });
+    if (!currentOrgFormValues) return;
+    editOrgForm.setFieldsValue(currentOrgFormValues);
     setIsEditOrgModalOpen(true);
   };
 
   const handleUpdateOrg = async (values: any) => {
     if (!currentOrg || !currentOrgCharacter) return;
-    const nextData = cloneData(data);
-    const oldName = currentOrgCharacter.name;
-    const newName = values.name;
-
-    nextData.characters = nextData.characters.map((item: any) =>
-      item.name === oldName
-        ? {
-            ...item,
-            ...values,
-            is_organization: true,
-          }
-        : item,
-    );
-
-    nextData.organizations = nextData.organizations.map((item: any) =>
-      item.character_name === oldName
-        ? {
-            ...item,
-            character_name: newName,
-            power_level: values.power_level,
-            location: values.location,
-            motto: values.motto,
-            color: values.color,
-          }
-        : {
-            ...item,
-            parent_org_name: item.parent_org_name === oldName ? newName : item.parent_org_name,
-          },
-    );
-
-    nextData.organization_members = nextData.organization_members.map((item: any) => ({
-      ...item,
-      organization_name: item.organization_name === oldName ? newName : item.organization_name,
-    }));
+    const characterIndex = (data.characters as WorkspaceCharacter[]).findIndex((item) => item.name === currentOrgCharacter.name);
+    if (characterIndex < 0) return;
+    const nextCharacter: WorkspaceCharacter = {
+      ...currentOrgCharacter,
+      ...values,
+      is_organization: true,
+      power_level: values.power_level,
+      location: values.location,
+      motto: values.motto,
+      color: values.color,
+    };
 
     try {
-      await persist(nextData);
+      const nextData = updateCharacterAtIndex(data as any, characterIndex, nextCharacter);
+      await persist(updateOrganizations(nextData as any, nextData.organizations as any) as any);
       message.success('组织信息更新成功');
       setIsEditOrgModalOpen(false);
     } catch {
@@ -220,14 +214,11 @@ export default function WorkspaceOrganizationsPage() {
       content: '会同时删除组织角色卡、组织详情与成员映射，仅影响本地工作区。',
       centered: true,
       onOk: async () => {
-        const nextData = cloneData(data);
-        nextData.characters = nextData.characters.filter((item: any) => item.name !== currentOrgCharacter.name);
-        nextData.organizations = nextData.organizations.filter((item: any) => item.character_name !== currentOrgCharacter.name);
-        nextData.organization_members = nextData.organization_members.filter(
-          (item: any) => item.organization_name !== currentOrgCharacter.name,
-        );
+        const characterIndex = (data.characters as WorkspaceCharacter[]).findIndex((item) => item.name === currentOrgCharacter.name);
+        if (characterIndex < 0) return;
         try {
-          await persist(nextData);
+          const nextData = deleteCharacterAtIndex(data as any, characterIndex);
+          await persist(nextData as any);
           message.success('组织删除成功');
           setSelectedIndex(0);
         } catch {
@@ -255,7 +246,7 @@ export default function WorkspaceOrganizationsPage() {
     });
     syncMemberCount(nextData, currentOrg.character_name);
     try {
-      await persist(nextData);
+      await persist(updateOrganizationMembers(nextData as any, nextData.organization_members as any) as any);
       message.success('成员添加成功');
       setIsAddMemberModalOpen(false);
       addMemberForm.resetFields();
@@ -285,7 +276,7 @@ export default function WorkspaceOrganizationsPage() {
       syncMemberCount(nextData, currentOrg.character_name);
     }
     try {
-      await persist(nextData);
+      await persist(updateOrganizationMembers(nextData as any, nextData.organization_members as any) as any);
       message.success('成员信息更新成功');
       setIsEditMemberModalOpen(false);
       setEditingMemberIndex(null);
@@ -306,7 +297,7 @@ export default function WorkspaceOrganizationsPage() {
         nextData.organization_members = nextData.organization_members.filter((_: any, index: number) => index !== member._index);
         syncMemberCount(nextData, currentOrg.character_name);
         try {
-          await persist(nextData);
+          await persist(updateOrganizationMembers(nextData as any, nextData.organization_members as any) as any);
           message.success('成员移除成功');
         } catch {
           // saveData handles errors
@@ -702,7 +693,16 @@ export default function WorkspaceOrganizationsPage() {
         </Form>
       </Modal>
 
-      <Modal title="编辑组织信息" open={isEditOrgModalOpen} onCancel={() => setIsEditOrgModalOpen(false)} footer={null} width={720}>
+      <Modal
+        title="编辑组织信息"
+        open={isEditOrgModalOpen}
+        onCancel={() => {
+          setIsEditOrgModalOpen(false);
+          editOrgForm.resetFields();
+        }}
+        footer={null}
+        width={720}
+      >
         <Form form={editOrgForm} layout="vertical" onFinish={handleUpdateOrg}>
           <Form.Item name="name" label="组织名称" rules={[{ required: true }]}>
             <Input />
