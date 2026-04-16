@@ -28,6 +28,29 @@
 
 换句话说，`Workspace Studio` 的价值不在于替代 MuMu，而在于为 MuMu 增加一条更适合本地编辑与 AI 协作的工作流。
 
+## ⚡ 一页式快速开始
+
+如果你已经完成了 MuMu Novel 的基础环境准备，可以直接按下面的顺序启动：
+
+```powershell
+python start_mumu.py
+python workspace-studio/start_studio.py
+```
+
+启动完成后访问：
+
+- MuMu Novel：`http://127.0.0.1:8000`
+- Workspace Studio：`http://127.0.0.1:8011`
+
+首次启动 `Workspace Studio` 时，脚本会自动检查前端依赖与构建产物：
+
+- 缺少 `workspace-studio/frontend/node_modules` 时会自动执行 `npm install`
+- 缺少 `workspace-studio/frontend-dist/index.html` 时会自动执行 `npm run build`
+
+如果你还没有准备好 MuMu Novel 运行环境，请先阅读：
+
+- [docs/MUMU_README.md](docs/MUMU_README.md)
+
 ## 🧩 核心能力
 
 - **工作区拉取与回写**：将 MuMu 项目拉取为本地 Markdown 工作区，并在校验后写回标准结构
