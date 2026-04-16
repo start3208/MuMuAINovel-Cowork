@@ -200,6 +200,12 @@ npm run dev
 
 前端开发服务器会将 `/api` 代理到 `http://127.0.0.1:8011`。
 
+## 🙏 致谢
+
+- 感谢 **MuMu Novel** 原项目提供完整的小说创作业务基础、项目结构与 API 能力，使 `Workspace Studio` 能够在此之上继续扩展本地工作区协作链路
+- 感谢 [FastAPI](https://fastapi.tiangolo.com/)、[React](https://react.dev/)、[Vite](https://vite.dev/)、[Ant Design](https://ant.design/) 与 [PostgreSQL](https://www.postgresql.org/) 等开源项目，为当前实现提供稳定可靠的技术基础
+- 感谢 `Claude Code`、`Codex` 等代码助手工作流带来的启发，让本项目得以围绕本地 Markdown 工作区进一步探索人机共创写作体验
+
 ## 📝 许可证
 
 本项目采用 [GNU General Public License v3.0](LICENSE)。
