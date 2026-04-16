@@ -42,7 +42,7 @@ python workspace-studio/start_studio.py
 - MuMu Novel：`http://127.0.0.1:8000`
 - Workspace Studio：`http://127.0.0.1:8011`
 
-首次启动 `Workspace Studio` 时，脚本会自动检查前端依赖与构建产物：
+启动 `Workspace Studio` 时，脚本会检查前端依赖与构建产物；若缺失，则自动执行安装或构建：
 
 - 缺少 `workspace-studio/frontend/node_modules` 时会自动执行 `npm install`
 - 缺少 `workspace-studio/frontend-dist/index.html` 时会自动执行 `npm run build`
